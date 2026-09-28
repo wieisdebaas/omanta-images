@@ -639,6 +639,14 @@ void PhotoThumbnailCache::clearMemory()
     g_photoMemoryCache.clear();
 }
 
+void PhotoThumbnailCache::clearAll()
+{
+    clearMemory();
+    const QString root = cacheRoot();
+    if (!root.isEmpty())
+        QDir(root).removeRecursively();
+}
+
 namespace {
 
 class PhotoThumbnailResponse : public QQuickImageResponse, public QRunnable
@@ -805,6 +813,11 @@ QString Thumbnails::photoSource(const QString &filePath, const QDateTime &modifi
 QString Thumbnails::originalSource(const QString &filePath) const
 {
     return QUrl::fromLocalFile(filePath).toString();
+}
+
+void Thumbnails::clearPhotoCache() const
+{
+    PhotoThumbnailCache::clearAll();
 }
 
 QString Thumbnails::pathFromId(const QString &id, ThumbnailCache::Version *version)
