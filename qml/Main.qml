@@ -258,6 +258,16 @@ Window {
                 }
 
                 ToolbarButton {
+                    glyph: "image"
+                    tip: qsTr("Photo view")
+                    active: root.currentTab && root.currentTab.viewMode === "photo"
+                    enabled: root.currentTab && Platform.isLocal(root.currentTab.path)
+                             && !root.currentTab.viewingStarred
+                             && !root.currentTab.viewingNetwork
+                    onTriggered: if (root.currentTab) root.currentTab.viewMode = "photo"
+                }
+
+                ToolbarButton {
                     symbol: "←"
                     tip: "Back (Alt+Left)"
                     enabled: root.currentTab && root.currentTab.history.canGoBack

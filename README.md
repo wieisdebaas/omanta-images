@@ -27,6 +27,10 @@ Omarchy theme.
   undo/redo and a progress popover
 - Thumbnails (images, video, PDF) via the freedesktop spec, sharing the
   system-wide cache
+- Photo view: an image-only virtualized gallery with prioritized asynchronous
+  loading, progressive full-photo preview, persistent multi-resolution
+  thumbnails (runtime-benchmarked WebP or PNG), and a bounded decoded-image
+  cache
 - Places sidebar: devices with mount/unmount/eject, Network (`smb://`,
   `sftp://`) with credential prompts, Trash, Recent, Starred, bookmarks.
   F9 shows or hides it, and the choice is remembered. In a narrow window
@@ -55,6 +59,32 @@ Extraction Undo preserves later additions, edits, and replacement files by
 refusing to remove an output that has changed.
 
 ## Install
+
+### Install this photo-view version on Omarchy
+
+Build this repository directly so the installed copy includes the photo view:
+
+```bash
+sudo pacman -S --needed base-devel git cmake ninja qt6-base qt6-declarative \
+  qt6-svg qt6-imageformats glib2 gvfs libarchive tinysparql
+git clone https://github.com/wieisdebaas/omanta-images.git
+cd omanta-images
+./bin/install
+~/.local/bin/omanta-switch omanta
+```
+
+This installs user-locally under `~/.local`, leaves Nautilus installed, and
+adds the Omanta toggle to Omarchy. Ensure `~/.local/bin` is on `PATH`; Omarchy
+normally configures this already. After pulling future changes, rerun
+`./bin/install`; the installed launcher points at this checkout's build.
+
+To return to Nautilus without removing the build:
+
+```bash
+~/.local/bin/omanta-switch nautilus
+```
+
+### Install an official release
 
 Grab the package from the [latest release](https://github.com/28allday/omanta/releases)
 and install it:

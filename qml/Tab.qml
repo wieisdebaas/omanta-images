@@ -29,7 +29,8 @@ FocusScope {
     // The model the views and every helper below speak to. The two carry the
     // same roles and the same invokable surface, so nothing downstream knows
     // which is live.
-    readonly property var files: treeActive ? treeModel : proxy
+    readonly property var files: viewMode === "photo" ? photoProxy
+                                : treeActive ? treeModel : proxy
     readonly property alias history: history
     readonly property string title: path === "/" ? "/" : Platform.baseName(path)
     readonly property int selectionCount: Object.keys(selectedNames).length
@@ -185,6 +186,16 @@ FocusScope {
         // Nautilus preference, false out of the box: folders sort with the
         // files unless the user asks otherwise.
         foldersFirst: Settings.sortFoldersFirst
+    }
+
+    FileSortFilterModel {
+        id: photoProxy
+        sourceModel: dirModel
+        showHidden: root.showHidden
+        imagesOnly: true
+        sortKey: root.sortKey
+        sortDescending: root.sortDescending
+        foldersFirst: false
     }
 
     DirectoryTreeModel {
@@ -360,7 +371,7 @@ FocusScope {
         target: Previewer
         enabled: Previewer.owner === root
         function onSelectionEvent(direction) {
-            const vertical = root.viewMode === "icon" ? root.viewColumns : 1;
+            const vertical = root.viewMode !== "list" ? root.viewColumns : 1;
             const step = [1, -1, -vertical, vertical, -1, 1][direction];
             // From the item being previewed — the keyboard cursor may sit
             // elsewhere after a click.
@@ -591,7 +602,7 @@ FocusScope {
     }
 
     // Columns only mean something in the grid; the list is one per row.
-    readonly property int viewColumns: viewMode === "icon" && viewLoader.item
+    readonly property int viewColumns: viewMode !== "list" && viewLoader.item
                                        ? viewLoader.item.columns : 1
 
     // The list view's live column ids — what is actually rendered, not what
@@ -635,7 +646,7 @@ FocusScope {
         case Qt.Key_Up:
             moveCurrent(-viewColumns, extend); event.accepted = true; return;
         case Qt.Key_Right:
-            if (viewMode === "icon") { moveCurrent(1, extend); event.accepted = true; }
+            if (viewMode !== "list") { moveCurrent(1, extend); event.accepted = true; }
             else if (treeActive && currentIndex >= 0) {
                 // GTK tree keys: Right expands a folder; on one already
                 // expanded it steps into the first child.
@@ -648,7 +659,7 @@ FocusScope {
             }
             return;
         case Qt.Key_Left:
-            if (viewMode === "icon") { moveCurrent(-1, extend); event.accepted = true; }
+            if (viewMode !== "list") { moveCurrent(-1, extend); event.accepted = true; }
             else if (treeActive && currentIndex >= 0) {
                 // …and Left collapses, or from a plain row jumps to its parent.
                 if (files.valueAt(currentIndex, "expanded"))
@@ -721,7 +732,8 @@ FocusScope {
 
         anchors.fill: parent
         focus: true
-        sourceComponent: root.viewMode === "icon" ? iconViewComponent : listViewComponent
+        sourceComponent: root.viewMode === "photo" ? photoViewComponent
+                   : root.viewMode === "icon" ? iconViewComponent : listViewComponent
     }
 
     Component {
@@ -732,6 +744,11 @@ FocusScope {
     Component {
         id: iconViewComponent
         FileIconView { tab: root; currentIndex: root.currentIndex }
+    }
+
+    Component {
+        id: photoViewComponent
+        PhotoGridView { tab: root; currentIndex: root.currentIndex }
     }
 
     // Nautilus's Network empty state — without it, an empty network view is

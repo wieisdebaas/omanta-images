@@ -90,6 +90,15 @@ void FileSortFilterModel::setFoldersOnly(bool foldersOnly)
     Q_EMIT foldersOnlyChanged();
 }
 
+void FileSortFilterModel::setImagesOnly(bool imagesOnly)
+{
+    if (m_imagesOnly == imagesOnly)
+        return;
+    m_imagesOnly = imagesOnly;
+    invalidateRowsFilter();
+    Q_EMIT imagesOnlyChanged();
+}
+
 bool FileSortFilterModel::filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const
 {
     const QModelIndex idx = sourceModel()->index(sourceRow, 0, sourceParent);
@@ -105,6 +114,10 @@ bool FileSortFilterModel::filterAcceptsRow(int sourceRow, const QModelIndex &sou
     }
 
     if (m_foldersOnly && !idx.data(DirectoryModel::IsDirRole).toBool())
+        return false;
+
+    if (m_imagesOnly
+        && !idx.data(DirectoryModel::ContentTypeRole).toString().startsWith(QLatin1String("image/")))
         return false;
 
     if (!m_nameFilter.isEmpty()) {

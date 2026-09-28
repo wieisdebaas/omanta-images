@@ -1,26 +1,37 @@
 #include "ThumbnailProvider.h"
 
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QImageWriter>
 #include <QProcess>
 #include <QQuickImageResponse>
 #include <QRunnable>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QThread>
 #include <QThreadPool>
 #include <QUrl>
 
 #include <gio/gio.h>
+
+#include <atomic>
+#include <limits>
 
 namespace {
 
 QMutex g_registryMutex;
 bool g_registryLoaded = false;
 QHash<QString, QStringList> g_thumbnailers; // mime type → argv template
+QMutex g_photoCacheMutex;
+QCache<QString, QImage> g_photoMemoryCache;
+qint64 g_photoMemoryLimit = PhotoThumbnailCache::DefaultMemoryLimit;
 
 QString thumbnailRoot()
 {
@@ -39,6 +50,65 @@ QString hashFor(const QString &filePath)
 QString uriFor(const QString &filePath)
 {
     return QString::fromLatin1(QUrl::fromLocalFile(filePath).toEncoded());
+}
+
+QString photoKey(const QString &filePath, int bucket, const ThumbnailCache::Version &version)
+{
+    QFileInfo info(filePath);
+    QString canonical = info.canonicalFilePath();
+    if (canonical.isEmpty())
+        canonical = info.absoluteFilePath();
+    const QByteArray identity = canonical.toUtf8() + '\0'
+        + QByteArray::number(version.size) + '\0'
+        + QByteArray::number(version.modifiedMSecs) + '\0'
+        + QByteArray::number(bucket);
+    return QString::fromLatin1(QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex());
+}
+
+QByteArray photoFormat()
+{
+    static const QByteArray format = [] {
+        const QList<QByteArray> supported = QImageWriter::supportedImageFormats();
+        if (!supported.contains("webp"))
+            return QByteArrayLiteral("png");
+
+        QImage sample(512, 512, QImage::Format_RGB32);
+        for (int y = 0; y < sample.height(); ++y) {
+            auto *line = reinterpret_cast<QRgb *>(sample.scanLine(y));
+            for (int x = 0; x < sample.width(); ++x)
+                line[x] = qRgb((x * 13 + y * 3) & 255,
+                               (x * 5 + y * 11) & 255,
+                               (x * 7 + y * 17) & 255);
+        }
+
+        const auto score = [&sample](const QByteArray &candidate) {
+            QByteArray encoded;
+            QBuffer buffer(&encoded);
+            buffer.open(QIODevice::WriteOnly);
+            QImageWriter writer(&buffer, candidate);
+            if (candidate == QByteArrayLiteral("webp"))
+                writer.setQuality(82);
+            QElapsedTimer timer;
+            timer.start();
+            if (!writer.write(sample))
+                return std::numeric_limits<qint64>::max();
+            const qint64 encodeNsecs = timer.nsecsElapsed();
+
+            timer.restart();
+            for (int iteration = 0; iteration < 3; ++iteration) {
+                if (QImage::fromData(encoded, candidate.constData()).isNull())
+                    return std::numeric_limits<qint64>::max();
+            }
+            const qint64 decodeNsecs = timer.nsecsElapsed() / 3;
+            // Reads and decodes dominate repeat visits; generation is paid
+            // once. One byte per nanosecond approximates fast local storage.
+            return decodeNsecs + encodeNsecs / 8 + encoded.size();
+        };
+
+        return score(QByteArrayLiteral("webp")) < score(QByteArrayLiteral("png"))
+            ? QByteArrayLiteral("webp") : QByteArrayLiteral("png");
+    }();
+    return format;
 }
 
 } // namespace
@@ -467,6 +537,208 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
 
 // ---------------------------------------------------------------------------
 
+int PhotoThumbnailCache::bucketFor(int requestedSize)
+{
+    if (requestedSize <= 256)
+        return 256;
+    if (requestedSize <= 512)
+        return 512;
+    return 1024;
+}
+
+QString PhotoThumbnailCache::cacheRoot()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)
+           + QStringLiteral("/omanta/photo-thumbnails");
+}
+
+QString PhotoThumbnailCache::cachePathFor(const QString &filePath, int bucket,
+                                          const ThumbnailCache::Version &version)
+{
+    const QString extension = QString::fromLatin1(photoFormat());
+    return QStringLiteral("%1/%2/%3.%4")
+        .arg(cacheRoot(), QString::number(bucket), photoKey(filePath, bucket, version), extension);
+}
+
+QImage PhotoThumbnailCache::load(const QString &filePath, int bucket,
+                                 const ThumbnailCache::Version &version)
+{
+    if (!(ThumbnailCache::Version::of(filePath) == version))
+        return {};
+
+    const QString key = photoKey(filePath, bucket, version);
+    {
+        QMutexLocker lock(&g_photoCacheMutex);
+        if (QImage *cached = g_photoMemoryCache.object(key))
+            return *cached;
+    }
+
+    QImage image(cachePathFor(filePath, bucket, version));
+    if (image.isNull())
+        return {};
+
+    QMutexLocker lock(&g_photoCacheMutex);
+    const int cost = int(qMin<qint64>(image.sizeInBytes(), std::numeric_limits<int>::max()));
+    g_photoMemoryCache.insert(key, new QImage(image), cost);
+    return image;
+}
+
+void PhotoThumbnailCache::store(const QString &filePath, int bucket,
+                                const ThumbnailCache::Version &version, const QImage &image)
+{
+    if (image.isNull() || !(ThumbnailCache::Version::of(filePath) == version))
+        return;
+
+    const QString path = cachePathFor(filePath, bucket, version);
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile output(path);
+    if (output.open(QIODevice::WriteOnly)) {
+        QImageWriter writer(&output, photoFormat());
+        if (photoFormat() == QByteArrayLiteral("webp"))
+            writer.setQuality(82);
+        if (writer.write(image))
+            output.commit();
+        else
+            output.cancelWriting();
+    }
+
+    const QString key = photoKey(filePath, bucket, version);
+    QMutexLocker lock(&g_photoCacheMutex);
+    const int cost = int(qMin<qint64>(image.sizeInBytes(), std::numeric_limits<int>::max()));
+    g_photoMemoryCache.insert(key, new QImage(image), cost);
+}
+
+void PhotoThumbnailCache::setMemoryLimit(qint64 bytes)
+{
+    QMutexLocker lock(&g_photoCacheMutex);
+    g_photoMemoryLimit = qMax<qint64>(0, qMin<qint64>(bytes, std::numeric_limits<int>::max()));
+    g_photoMemoryCache.setMaxCost(int(g_photoMemoryLimit));
+}
+
+qint64 PhotoThumbnailCache::memoryLimit()
+{
+    QMutexLocker lock(&g_photoCacheMutex);
+    return g_photoMemoryLimit;
+}
+
+qint64 PhotoThumbnailCache::memoryCost()
+{
+    QMutexLocker lock(&g_photoCacheMutex);
+    return g_photoMemoryCache.totalCost();
+}
+
+int PhotoThumbnailCache::memoryCount()
+{
+    QMutexLocker lock(&g_photoCacheMutex);
+    return g_photoMemoryCache.size();
+}
+
+void PhotoThumbnailCache::clearMemory()
+{
+    QMutexLocker lock(&g_photoCacheMutex);
+    g_photoMemoryCache.clear();
+}
+
+namespace {
+
+class PhotoThumbnailResponse : public QQuickImageResponse, public QRunnable
+{
+public:
+    PhotoThumbnailResponse(QString filePath, ThumbnailCache::Version version, int size)
+        : m_filePath(std::move(filePath))
+        , m_version(version)
+        , m_bucket(PhotoThumbnailCache::bucketFor(size))
+    {
+        setAutoDelete(false);
+    }
+
+    QQuickTextureFactory *textureFactory() const override
+    {
+        return QQuickTextureFactory::textureFactoryForImage(m_image);
+    }
+
+    void cancel() override { m_cancelled.store(true, std::memory_order_relaxed); }
+
+    void run() override
+    {
+        if (m_cancelled.load(std::memory_order_relaxed))
+            return finish(QStringLiteral("cancelled"));
+
+        m_image = PhotoThumbnailCache::load(m_filePath, m_bucket, m_version);
+        if (!m_image.isNull())
+            return finish({});
+
+        if (m_cancelled.load(std::memory_order_relaxed))
+            return finish(QStringLiteral("cancelled"));
+
+        QImage image = ThumbnailCache::renderImageFile(m_filePath, m_bucket);
+        if (m_cancelled.load(std::memory_order_relaxed))
+            return finish(QStringLiteral("cancelled"));
+        if (image.isNull())
+            return finish(QStringLiteral("could not render"));
+        if (!(ThumbnailCache::Version::of(m_filePath) == m_version))
+            return finish(QStringLiteral("file changed"));
+
+        PhotoThumbnailCache::store(m_filePath, m_bucket, m_version, image);
+        m_image = std::move(image);
+        finish({});
+    }
+
+    QString errorString() const override { return m_error; }
+
+private:
+    void finish(const QString &error)
+    {
+        m_error = error;
+        Q_EMIT finished();
+    }
+
+    QString m_filePath;
+    ThumbnailCache::Version m_version;
+    int m_bucket;
+    std::atomic_bool m_cancelled = false;
+    QImage m_image;
+    QString m_error;
+};
+
+} // namespace
+
+PhotoThumbnailProvider::PhotoThumbnailProvider()
+{
+    PhotoThumbnailCache::setMemoryLimit(PhotoThumbnailCache::DefaultMemoryLimit);
+    m_pool.setMaxThreadCount(qMax(2, qMin(4, QThread::idealThreadCount())));
+    m_pool.setExpiryTimeout(30000);
+}
+
+PhotoThumbnailProvider::~PhotoThumbnailProvider()
+{
+    m_pool.clear();
+    m_pool.waitForDone();
+    PhotoThumbnailCache::clearMemory();
+}
+
+QQuickImageResponse *PhotoThumbnailProvider::requestImageResponse(const QString &id,
+                                                                  const QSize &requestedSize)
+{
+    const QStringList parts = id.split(QLatin1Char('/'), Qt::KeepEmptyParts);
+    if (parts.size() < 4)
+        return new PhotoThumbnailResponse({}, {}, 256);
+
+    const int priority = parts.at(0).toInt();
+    const int encodedSize = parts.at(1).toInt();
+    const QStringList version = parts.at(2).split(QLatin1Char('-'));
+    ThumbnailCache::Version expected;
+    if (version.size() == 2)
+        expected = { version.at(0).toLongLong(), version.at(1).toLongLong() };
+    const QString path = QUrl::fromPercentEncoding(parts.mid(3).join(QLatin1Char('/')).toUtf8());
+    const int size = requestedSize.width() > 0 ? requestedSize.width() : encodedSize;
+    auto *response = new PhotoThumbnailResponse(path, expected, size);
+    m_pool.start(response, priority);
+    return response;
+}
+
+// ---------------------------------------------------------------------------
+
 Thumbnails::Thumbnails(QObject *parent)
     : QObject(parent)
 {
@@ -516,6 +788,23 @@ QString Thumbnails::source(const QString &filePath, const QDateTime &modified,
         .arg(msecs)
         .arg(fileSize)
         .arg(QString::fromLatin1(QUrl::toPercentEncoding(filePath, "/")));
+}
+
+QString Thumbnails::photoSource(const QString &filePath, const QDateTime &modified,
+                                qint64 fileSize, int requestedSize, int priority) const
+{
+    const qint64 msecs = modified.isValid() ? modified.toMSecsSinceEpoch() : 0;
+    return QStringLiteral("image://photo/%1/%2/%3-%4/%5")
+        .arg(priority)
+        .arg(PhotoThumbnailCache::bucketFor(requestedSize))
+        .arg(msecs)
+        .arg(fileSize)
+        .arg(QString::fromLatin1(QUrl::toPercentEncoding(filePath, "/")));
+}
+
+QString Thumbnails::originalSource(const QString &filePath) const
+{
+    return QUrl::fromLocalFile(filePath).toString();
 }
 
 QString Thumbnails::pathFromId(const QString &id, ThumbnailCache::Version *version)

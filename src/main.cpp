@@ -80,6 +80,8 @@ int main(int argc, char *argv[])
     app.setOrganizationDomain(QStringLiteral("omarchy.org"));
     app.setDesktopFileName(QStringLiteral("omanta"));
     app.setApplicationVersion(QStringLiteral("0.1.20"));
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     [] { PhotoThumbnailCache::clearMemory(); });
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Browse files."));
@@ -122,6 +124,7 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     engine.addImageProvider(QStringLiteral("fileicon"), new IconImageProvider);
     engine.addImageProvider(QStringLiteral("thumbnail"), new ThumbnailProvider);
+    engine.addImageProvider(QStringLiteral("photo"), new PhotoThumbnailProvider);
 
 
     Application application(&engine);

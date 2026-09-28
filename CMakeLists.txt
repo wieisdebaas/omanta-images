@@ -87,6 +87,7 @@ set(OMANTA_QML_FILES
     qml/Sidebar.qml
     qml/FileListView.qml
     qml/FileIconView.qml
+    qml/PhotoGridView.qml
     qml/FileDrag.qml
     qml/ToolbarButton.qml
     qml/DialogCloseButton.qml

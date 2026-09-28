@@ -17,6 +17,7 @@ class FileSortFilterModel : public QSortFilterProxyModel
     Q_PROPERTY(bool showHidden READ showHidden WRITE setShowHidden NOTIFY showHiddenChanged)
     Q_PROPERTY(QString nameFilter READ nameFilter WRITE setNameFilter NOTIFY nameFilterChanged)
     Q_PROPERTY(bool foldersOnly READ foldersOnly WRITE setFoldersOnly NOTIFY foldersOnlyChanged)
+    Q_PROPERTY(bool imagesOnly READ imagesOnly WRITE setImagesOnly NOTIFY imagesOnlyChanged)
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
@@ -51,6 +52,9 @@ public:
     bool foldersOnly() const { return m_foldersOnly; }
     void setFoldersOnly(bool foldersOnly);
 
+    bool imagesOnly() const { return m_imagesOnly; }
+    void setImagesOnly(bool imagesOnly);
+
     QString nameFilter() const { return m_nameFilter; }
     void setNameFilter(const QString &filter);
 
@@ -75,6 +79,7 @@ Q_SIGNALS:
     void foldersFirstChanged();
     void showHiddenChanged();
     void foldersOnlyChanged();
+    void imagesOnlyChanged();
     void nameFilterChanged();
     void countChanged();
 
@@ -86,6 +91,7 @@ private:
     bool m_foldersFirst = true;
     bool m_showHidden = false;
     bool m_foldersOnly = false;
+    bool m_imagesOnly = false;
     QString m_nameFilter;
     QCollator m_collator;
 };
