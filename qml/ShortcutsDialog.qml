@@ -33,7 +33,7 @@ Dialog {
             ["Enter", qsTr("Open the selection")], ["Space", qsTr("Preview the selected file")],
             ["Backspace", qsTr("Parent folder")]] },
         { name: qsTr("View"), rows: [
-            ["Ctrl+1 / Ctrl+2", qsTr("List / icon view")], ["Ctrl+H", qsTr("Show hidden files")],
+            ["Ctrl+1 / Ctrl+2 / Ctrl+3", qsTr("List / icon / photo view")], ["Ctrl+H", qsTr("Show hidden files")],
             ["Ctrl++ / Ctrl+-", qsTr("Zoom in / out")], ["Ctrl+0", qsTr("Reset zoom")],
             ["Ctrl+R / F5", qsTr("Reload")]] },
         { name: qsTr("Search"), rows: [
@@ -41,14 +41,17 @@ Dialog {
             ["Ctrl+Shift+F", qsTr("Search file contents")]] },
         { name: qsTr("Files"), rows: [
             ["Ctrl+C / Ctrl+X / Ctrl+V", qsTr("Copy / cut / paste")],
-            ["Ctrl+Z", qsTr("Undo")], ["Ctrl+Shift+Z", qsTr("Redo")],
+            [ "Ctrl+Z", qsTr("Undo") ],
+            [ "Ctrl+Shift+Z", qsTr("Redo") ],
             ["Ctrl+A", qsTr("Select all")],
             ["F2", qsTr("Rename (batch rename on a multi-selection)")],
-            ["Delete", qsTr("Move to trash")], ["Shift+Delete", qsTr("Delete permanently")],
+            [ "Delete", qsTr("Move to trash") ],
+            [ "Ctrl+Shift+Delete", qsTr("Empty trash") ],
             ["Ctrl+Shift+N", qsTr("New folder")], ["Ctrl+D", qsTr("Bookmark this folder")],
             ["Ctrl+I / Alt+Return", qsTr("Properties")]] },
         { name: qsTr("Application"), rows: [
-            ["Ctrl+,", qsTr("Preferences")], ["Ctrl+?", qsTr("Keyboard shortcuts")]] }
+            [ "Ctrl+Q", qsTr("Quit") ],
+            [ "Ctrl+Shift+Q", qsTr("Quit without saving") ]] }
     ]
 
     contentItem: ScrollView {

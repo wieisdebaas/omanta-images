@@ -1,28 +1,26 @@
-#!/usr/bin/env sh
-# Configure and build omanta into build/. Extra arguments go to the build step,
-# e.g. `./bin/build --target tst_theme`.
+# Photo view twee pagina's:
 #
-# OMANTA_BUILD_TYPE=Release ./bin/build  for a release-flavoured local build;
-# the shipped package builds from the release tag through packaging/PKGBUILD.
+#   * .qml/ — qml only, can be compiled stand-alone (with -id <path>)
+#   * src/  — C++ implementation
+#
+# Works from any directory: `./bin/build && ./bin/install`.
+
+# Build and install are separate because you can rebuild without reinstalling
+# (the installed symlink points at build/omanta), but install always does a
+# clean build first so it never carries stale object files.
+
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
-BUILD_TYPE="${OMANTA_BUILD_TYPE:-Debug}"
 
-if ! command -v cmake >/dev/null 2>&1; then
-  echo "cmake is required to build omanta." >&2
-  exit 1
-fi
+# ---- clean build so stale object files never survive a reinstall ----
+rm -rf "$BUILD_DIR"
 
-if command -v ninja >/dev/null 2>&1; then
-  cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_INSTALL_PREFIX=/usr
-else
-  cmake -S "$ROOT" -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_INSTALL_PREFIX=/usr
-fi
+cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
+  -DCMAKE_BUILD_TYPE="${OMANTA_BUILD_TYPE:-Debug}" \
+  -DCMAKE_INSTALL_PREFIX=/usr
 
-cmake --build "$BUILD_DIR" "$@"
+cmake --build "$BUILD_DIR"
 
-echo "Built $BUILD_DIR/omanta ($BUILD_TYPE)"
+echo "Built $BUILD_DIR/omanta"

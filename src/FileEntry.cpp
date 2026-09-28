@@ -1,6 +1,51 @@
 #include "FileEntry.h"
 
+#include <QFileInfo>
 #include <QUrl>
+
+namespace {
+
+// Omarchy/GNOME put share bookmarks under ~/Network as symlinks into
+// /run/user/…/gvfs/smb-share:server=…,share=…. When the share is not
+// mounted those links are broken and look like tiny files. Convert the
+// fuse path back to an smb:// URI so double-click can mount and open it.
+QString smbUriFromGvfsSymlinkTarget(const QString &target)
+{
+    const QString marker = QStringLiteral("smb-share:");
+    const int at = target.indexOf(marker);
+    if (at < 0)
+        return {};
+
+    QString server;
+    QString share;
+    QString user;
+    const QString params = target.mid(at + marker.size());
+    for (const QString &part : params.split(QLatin1Char(','))) {
+        const int eq = part.indexOf(QLatin1Char('='));
+        if (eq <= 0)
+            continue;
+        const QString key = part.left(eq);
+        const QString value = part.mid(eq + 1);
+        if (key == QLatin1String("server"))
+            server = value;
+        else if (key == QLatin1String("share"))
+            share = value;
+        else if (key == QLatin1String("user"))
+            user = value;
+    }
+    if (server.isEmpty() || share.isEmpty())
+        return {};
+
+    QUrl url;
+    url.setScheme(QStringLiteral("smb"));
+    url.setHost(server);
+    if (!user.isEmpty())
+        url.setUserName(user);
+    url.setPath(QLatin1Char('/') + share);
+    return url.toString();
+}
+
+} // namespace
 
 QString FileEntry::permissionString() const
 {
@@ -47,7 +92,8 @@ const char *FileEntry::queryAttributes()
            G_FILE_ATTRIBUTE_OWNER_GROUP ","
            G_FILE_ATTRIBUTE_UNIX_MODE ","
            G_FILE_ATTRIBUTE_TRASH_ORIG_PATH ","
-           G_FILE_ATTRIBUTE_STANDARD_TARGET_URI;
+           G_FILE_ATTRIBUTE_STANDARD_TARGET_URI ","
+           G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET;
 }
 
 FileEntry FileEntry::fromInfo(GFileInfo *info)
@@ -114,6 +160,26 @@ FileEntry FileEntry::fromInfo(GFileInfo *info)
         entry.isDir = true;
     }
 
+    // ~/Network bookmarks: symlinks into gvfs smb-share fuse paths. Treat
+    // them as folders that open the share URI (works even when unmounted).
+    if (type == G_FILE_TYPE_SYMBOLIC_LINK || entry.isSymlink) {
+        if (const char *link = g_file_info_get_attribute_byte_string(
+                info, G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET)) {
+            const QString symlinkTarget = QString::fromUtf8(link);
+            const QString smbUri = smbUriFromGvfsSymlinkTarget(symlinkTarget);
+            if (!smbUri.isEmpty()) {
+                entry.isPlaceLink = true;
+                entry.isDir = true;
+                entry.targetPath = smbUri;
+            } else if (QFileInfo(symlinkTarget).isDir()) {
+                // A live symlink to a directory — open as a folder.
+                entry.isDir = true;
+                entry.targetPath = symlinkTarget;
+                entry.isPlaceLink = true;
+            }
+        }
+    }
+
     // Millisecond precision too: an edit within the same second must still
     // change the row, or its thumbnail keeps the old picture.
     if (GDateTime *modified = g_file_info_get_modification_date_time(info)) {
@@ -157,6 +223,10 @@ FileEntry FileEntry::fromInfo(GFileInfo *info)
                 entry.iconNames.append(QString::fromUtf8(names[i]));
         }
     }
+
+    // Network share bookmarks should look like folders, not broken links.
+    if (entry.isPlaceLink)
+        entry.iconNames = { QStringLiteral("folder-remote"), QStringLiteral("folder") };
 
     if (entry.iconNames.isEmpty())
         entry.iconNames.append(entry.isDir ? QStringLiteral("folder")

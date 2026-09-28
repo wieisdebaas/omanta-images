@@ -1,12 +1,14 @@
 #pragma once
 
 #include <QDateTime>
+#include <QCache>
 #include <QHash>
 #include <QImage>
 #include <QMutex>
 #include <QObject>
 #include <QQuickAsyncImageProvider>
 #include <QStringList>
+#include <QThreadPool>
 #include <QtQmlIntegration>
 
 // Thumbnails, implemented against the freedesktop thumbnail spec rather than a
@@ -79,6 +81,40 @@ public:
     QQuickImageResponse *requestImageResponse(const QString &id, const QSize &requestedSize) override;
 };
 
+class PhotoThumbnailCache
+{
+public:
+    static constexpr qint64 DefaultMemoryLimit = 256LL * 1024 * 1024;
+
+    static int bucketFor(int requestedSize);
+    static QString cacheRoot();
+    static QString cachePathFor(const QString &filePath, int bucket,
+                                const ThumbnailCache::Version &version);
+    static QImage load(const QString &filePath, int bucket,
+                       const ThumbnailCache::Version &version);
+    static void store(const QString &filePath, int bucket,
+                      const ThumbnailCache::Version &version, const QImage &image);
+
+    static void setMemoryLimit(qint64 bytes);
+    static qint64 memoryLimit();
+    static qint64 memoryCost();
+    static int memoryCount();
+    static void clearMemory();
+};
+
+class PhotoThumbnailProvider : public QQuickAsyncImageProvider
+{
+public:
+    PhotoThumbnailProvider();
+    ~PhotoThumbnailProvider() override;
+
+    QQuickImageResponse *requestImageResponse(const QString &id,
+                                              const QSize &requestedSize) override;
+
+private:
+    QThreadPool m_pool;
+};
+
 // What QML needs to decide whether to even ask for a thumbnail.
 class Thumbnails : public QObject
 {
@@ -111,6 +147,10 @@ public:
     // names containing '#', '?' or '%' are not read as URL syntax.
     Q_INVOKABLE QString source(const QString &filePath, const QDateTime &modified,
                                qint64 fileSize) const;
+    Q_INVOKABLE QString photoSource(const QString &filePath, const QDateTime &modified,
+                                    qint64 fileSize, int requestedSize,
+                                    int priority = 0) const;
+    Q_INVOKABLE QString originalSource(const QString &filePath) const;
     // The inverse, as the provider sees it: the file path an id names, and
     // optionally the version of it the id asks for (a zero mtime means
     // "whatever is there": remote rows may not report one).

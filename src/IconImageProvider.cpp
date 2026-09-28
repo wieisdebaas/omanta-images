@@ -137,6 +137,7 @@ QString glyphForName(QString name)
 
     // The app's own chrome (not a GIO name): the view-switch button.
     if (name == QLatin1String("view-grid")) return QStringLiteral("grid");
+    if (name == QLatin1String("view-photo")) return QStringLiteral("image");
     if (name == QLatin1String("view-sidebar")) return QStringLiteral("sidebar");
 
     // The sidebar's specials and everything folder-ish.

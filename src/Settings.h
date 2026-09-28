@@ -84,7 +84,7 @@ public:
     QString showThumbnails() const { return choiceFor("showThumbnails", {"local-only", "never", "always"}); }
     QString showDirectoryItemCounts() const { return choiceFor("showDirectoryItemCounts", {"local-only", "never", "always"}); }
     QString dateTimeFormat() const { return choiceFor("dateTimeFormat", {"simple", "detailed"}); }
-    QString defaultViewMode() const { return choiceFor("defaultViewMode", {"icon", "list"}); }
+    QString defaultViewMode() const { return choiceFor("defaultViewMode", {"icon", "list", "photo"}); }
     bool showHiddenFiles() const { return boolFor("showHiddenFiles", false); }
     bool showSidebar() const { return boolFor("showSidebar", true); }
     QStringList listColumnOrder() const;

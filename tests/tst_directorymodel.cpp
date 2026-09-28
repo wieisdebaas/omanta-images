@@ -26,6 +26,7 @@ private Q_SLOTS:
     void parsesFileAttributes();
     void toleratesSparseFileInfo();
     void shareRowsOpenTheirTarget();
+    void networkSymlinkSharesOpenAsFolders();
     void insertsCreatedFileInPlace();
     void removesDeletedFile();
     void handlesRenameAsRemoveAndInsert();
@@ -202,6 +203,24 @@ void TestDirectoryModel::shareRowsOpenTheirTarget()
     g_object_unref(info);
     QVERIFY(!bare.isPlaceLink);
     QVERIFY(!bare.isDir);
+}
+
+void TestDirectoryModel::networkSymlinkSharesOpenAsFolders()
+{
+    // ~/Network/host/Share → /run/user/…/gvfs/smb-share:server=…,share=…
+    GFileInfo *info = g_file_info_new();
+    g_file_info_set_name(info, "Dushi");
+    g_file_info_set_file_type(info, G_FILE_TYPE_SYMBOLIC_LINK);
+    g_file_info_set_is_symlink(info, TRUE);
+    g_file_info_set_attribute_byte_string(
+        info, G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET,
+        "/run/user/1000/gvfs/smb-share:server=wieisdebaas.local,share=dushi,user=admin");
+    const FileEntry share = FileEntry::fromInfo(info);
+    g_object_unref(info);
+
+    QVERIFY(share.isPlaceLink);
+    QVERIFY(share.isDir);
+    QCOMPARE(share.targetPath, QStringLiteral("smb://admin@wieisdebaas.local/dushi"));
 }
 
 void TestDirectoryModel::insertsCreatedFileInPlace()

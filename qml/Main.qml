@@ -520,14 +520,18 @@ Window {
                 }
 
                 ToolbarButton {
-                    // Shows the view you'd switch TO: four squares for grid,
-                    // lines for list. "▦" was a crosshatch mess at 15px.
-                    glyph: root.currentTab && root.currentTab.viewMode === "list" ? "view-grid" : ""
+                    // Shows the view you'd switch TO: grid, photo frame, or
+                    // list lines. Cycles list → icon → photo → list.
+                    glyph: root.viewMode === "list" ? "view-grid"
+                         : root.viewMode === "icon" ? "view-photo" : ""
                     symbol: "☰"
-                    tip: "Switch view (Ctrl+1 / Ctrl+2)"
+                    tip: "Switch view (Ctrl+1 / Ctrl+2 / Ctrl+3)"
                     onTriggered: {
-                        if (root.currentTab)
-                            root.setViewMode(root.currentTab.viewMode === "list" ? "icon" : "list");
+                        if (!root.currentTab)
+                            return;
+                        const mode = root.viewMode;
+                        root.setViewMode(mode === "list" ? "icon"
+                                      : mode === "icon" ? "photo" : "list");
                     }
                 }
 
@@ -1810,8 +1814,41 @@ Window {
             enabled: root.currentTab && root.currentTab.selectionCount === 1
             onTriggered: {
                 const selected = root.currentTab.selectedPaths();
-                if (selected.length === 1 && Platform.isDir(selected[0]))
-                    root.addTab(selected[0]);
+                if (selected.length !== 1)
+                    return;
+                const path = selected[0];
+                if (Platform.isDir(path)) {
+                    root.addTab(path);
+                    return;
+                }
+                // A file (esp. in photo view): open its folder in a new tab
+                // and select the file once the listing lands.
+                const parent = Platform.parentPath(path);
+                if (parent)
+                    root.addTab(parent, Platform.baseName(path));
+            }
+        }
+
+        MenuItem {
+            // Photo (and nested-search) rows live outside the folder on
+            // screen — jump to the real parent and select the file.
+            text: qsTr("Open Containing Folder")
+            visible: root.currentTab && root.currentTab.selectionCount === 1
+                     && root.viewMode === "photo"
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                const selected = root.currentTab.selectedPaths();
+                if (selected.length !== 1)
+                    return;
+                const path = selected[0];
+                if (Platform.isDir(path))
+                    return;
+                const parent = Platform.parentPath(path);
+                if (!parent)
+                    return;
+                root.setViewMode("icon");
+                root.currentTab.pendingSelection = Platform.baseName(path);
+                root.currentTab.navigate(parent);
             }
         }
 
@@ -2095,6 +2132,7 @@ Window {
 
     Shortcut { sequence: "Ctrl+1"; onActivated: root.setViewMode("list") }
     Shortcut { sequence: "Ctrl+2"; onActivated: root.setViewMode("icon") }
+    Shortcut { sequence: "Ctrl+3"; onActivated: root.setViewMode("photo") }
     Shortcut { sequence: "Ctrl++"; onActivated: if (root.currentTab) root.currentTab.zoomIn() }
     Shortcut { sequence: "Ctrl+="; onActivated: if (root.currentTab) root.currentTab.zoomIn() }
     Shortcut { sequence: "Ctrl+-"; onActivated: if (root.currentTab) root.currentTab.zoomOut() }

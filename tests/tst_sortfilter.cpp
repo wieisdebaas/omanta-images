@@ -2,6 +2,7 @@
 #include "FileSortFilterModel.h"
 #include "TestFixture.h"
 
+#include <QImage>
 #include <QTest>
 
 // Ordering and visibility. These are the rules a user notices instantly when
@@ -28,6 +29,7 @@ private Q_SLOTS:
     void tieBreaksOnName();
     void nameFilterMatchesSubstrings();
     void foldersOnlyHidesFiles();
+    void imagesOnlyHidesNonImages();
     void proxyRowForNameRoundTrips();
     void findByPrefixWrapsAround();
     void valueAtReadsNamedRoles();
@@ -369,6 +371,25 @@ void TestSortFilter::foldersOnlyHidesFiles()
 
     proxy.setFoldersOnly(false);
     QCOMPARE(proxy.count(), 3);
+}
+
+void TestSortFilter::imagesOnlyHidesNonImages()
+{
+    TempTree tree;
+    QImage image(8, 8, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QVERIFY(image.save(tree.filePath("photo.png")));
+    tree.writeFile("notes.txt");
+    tree.makeDir("album");
+
+    DirectoryModel model;
+    FileSortFilterModel proxy;
+    proxy.setSourceModel(&model);
+    proxy.setImagesOnly(true);
+    model.setPath(tree.path());
+
+    QTRY_COMPARE(model.rowCount(), 3);
+    QCOMPARE(visible(proxy), (QStringList{ "photo.png" }));
 }
 
 void TestSortFilter::proxyRowForNameRoundTrips()

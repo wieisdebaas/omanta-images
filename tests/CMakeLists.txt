@@ -127,6 +127,13 @@ omanta_test(tst_search
     ${CMAKE_SOURCE_DIR}/src/Location.cpp
 )
 
+omanta_test(tst_photo
+    ${CMAKE_SOURCE_DIR}/src/PhotoModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/DirectoryModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/FileEntry.cpp
+    ${CMAKE_SOURCE_DIR}/src/Location.cpp
+)
+
 omanta_test(tst_fts
     ${CMAKE_SOURCE_DIR}/src/SearchModel.cpp
     ${CMAKE_SOURCE_DIR}/src/DirectoryModel.cpp

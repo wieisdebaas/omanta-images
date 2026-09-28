@@ -25,6 +25,7 @@ optdepends=('gvfs-smb: browse smb:// shares'
             'gvfs-gphoto2: cameras'
             'ffmpegthumbnailer: video thumbnails'
             'localsearch: full-text search'
+            'qt6-imageformats: WebP photo thumbnail cache (PNG is used otherwise)'
             'sushi: Space previews')
 makedepends=('cmake' 'ninja' 'git')
 source=("$pkgname::git+https://github.com/28allday/omanta.git#tag=v$pkgver")

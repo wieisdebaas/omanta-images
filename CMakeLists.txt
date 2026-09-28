@@ -54,6 +54,8 @@ set(OMANTA_SOURCES
     src/Platform.h
     src/PlacesModel.cpp
     src/PlacesModel.h
+    src/PhotoModel.cpp
+    src/PhotoModel.h
     src/SearchModel.cpp
     src/StarredStore.cpp
     src/StarredStore.h
@@ -87,6 +89,7 @@ set(OMANTA_QML_FILES
     qml/Sidebar.qml
     qml/FileListView.qml
     qml/FileIconView.qml
+    qml/PhotoGridView.qml
     qml/FileDrag.qml
     qml/ToolbarButton.qml
     qml/DialogCloseButton.qml

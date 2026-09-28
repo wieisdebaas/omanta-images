@@ -1,11 +1,14 @@
 #!/usr/bin/env sh
 # Install the working tree for daily use, user-locally and alongside whatever
-# file manager you already have: a symlink to the build (so later rebuilds are
-# picked up without reinstalling), the desktop entry, the icon, the helper
-# scripts, and any context-menu actions you do not already have.
+# file manager you already have: a fresh symlink to a clean build, the desktop
+# entry, the icon, the helper scripts, and any context-menu actions you do not
+# already have.
 #
 # Nothing here touches /usr or pacman. The real package builds from the release
 # tag: cd packaging && makepkg -si
+#
+# Always does a clean rebuild from scratch, so `./bin/install` is also the
+# single command for "wipe everything and start over". Safe to run repeatedly.
 #
 # OMANTA_PREFIX=~/.local by default.
 set -eu
@@ -14,16 +17,29 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PREFIX="${OMANTA_PREFIX:-$HOME/.local}"
 ACTIONS_DIR="${OMANTA_ACTIONS_DIR:-$HOME/.config/omanta/actions}"
 
+# ---- clean build directory (idempotent: rm -rf on a missing dir is fine) ----
+BUILD_DIR="$ROOT/build"
+rm -rf "$BUILD_DIR"
+
+# ---- build ----
 "$ROOT/bin/build"
 
+# ---- install layout ----
 mkdir -p "$PREFIX/bin" "$PREFIX/share/applications" \
   "$PREFIX/share/icons/hicolor/scalable/apps" "$ACTIONS_DIR"
 
+# symlink — always brand new; rm -f makes it idempotent
+rm -f "$PREFIX/bin/omanta"
 ln -sfn "$ROOT/build/omanta" "$PREFIX/bin/omanta"
-install -m755 "$ROOT/packaging/bin/omanta-switch" "$ROOT/packaging/bin/omanta-launch" \
-  "$ROOT/packaging/bin/omanta-launch-cwd" "$ROOT/packaging/bin/omanta-dropbox-link" \
+
+install -m755 "$ROOT/packaging/bin/omanta-switch" \
+  "$ROOT/packaging/bin/omanta-launch" \
+  "$ROOT/packaging/bin/omanta-launch-cwd" \
+  "$ROOT/packaging/bin/omanta-dropbox-link" \
   "$PREFIX/bin/"
-install -m644 "$ROOT/packaging/omanta.desktop" "$PREFIX/share/applications/omanta.desktop"
+
+install -m644 "$ROOT/packaging/omanta.desktop" \
+  "$PREFIX/share/applications/omanta.desktop"
 install -m644 "$ROOT/packaging/omanta.svg" \
   "$PREFIX/share/icons/hicolor/scalable/apps/omanta.svg"
 

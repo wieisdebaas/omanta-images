@@ -41,6 +41,10 @@ private Q_SLOTS:
 
     void detectsTypeByContentNotExtension();
     void canThumbnailRespectsTypeAndSize();
+    void photoCachePersistsAcrossMemoryClears();
+    void photoCacheInvalidatesWhenSourceChanges();
+    void photoMemoryCacheIsBoundedAndClearable();
+    void photoProviderReleasesMemoryOnDestruction();
 
 private:
     static QString writeImage(const TempTree &tree, const QString &name, int w, int h)
@@ -306,6 +310,74 @@ void TestThumbnails::canThumbnailRespectsTypeAndSize()
 
     thumbnails.setEnabled(false);
     QVERIFY(!thumbnails.canThumbnail(QStringLiteral("image/jpeg"), 1000));
+}
+
+void TestThumbnails::photoCachePersistsAcrossMemoryClears()
+{
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("photo-cache.png"), 640, 480);
+    const auto version = ThumbnailCache::Version::of(path);
+    const QImage thumbnail = ThumbnailCache::renderImageFile(path, 256);
+
+    PhotoThumbnailCache::store(path, 256, version, thumbnail);
+    QVERIFY(QFile::exists(PhotoThumbnailCache::cachePathFor(path, 256, version)));
+    PhotoThumbnailCache::clearMemory();
+
+    const QImage reloaded = PhotoThumbnailCache::load(path, 256, version);
+    QVERIFY2(!reloaded.isNull(), "the disk cache must survive clearing decoded RAM images");
+}
+
+void TestThumbnails::photoCacheInvalidatesWhenSourceChanges()
+{
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("photo-edited.png"), 640, 480);
+    const auto oldVersion = ThumbnailCache::Version::of(path);
+    PhotoThumbnailCache::store(path, 256, oldVersion,
+                               ThumbnailCache::renderImageFile(path, 256));
+
+    tree.setModified(QStringLiteral("photo-edited.png"),
+                     QDateTime::currentDateTime().addSecs(10));
+    QVERIFY(PhotoThumbnailCache::load(path, 256, oldVersion).isNull());
+    QVERIFY(PhotoThumbnailCache::cachePathFor(path, 256, oldVersion)
+            != PhotoThumbnailCache::cachePathFor(path, 256,
+                                                  ThumbnailCache::Version::of(path)));
+}
+
+void TestThumbnails::photoMemoryCacheIsBoundedAndClearable()
+{
+    TempTree tree;
+    const qint64 previousLimit = PhotoThumbnailCache::memoryLimit();
+    PhotoThumbnailCache::clearMemory();
+    PhotoThumbnailCache::setMemoryLimit(80 * 1024);
+
+    for (int index = 0; index < 3; ++index) {
+        const QString path = writeImage(tree, QStringLiteral("bounded-%1.png").arg(index),
+                                        128, 128);
+        PhotoThumbnailCache::store(path, 256, ThumbnailCache::Version::of(path),
+                                   ThumbnailCache::renderImageFile(path, 256));
+    }
+
+    QVERIFY(PhotoThumbnailCache::memoryCost() <= PhotoThumbnailCache::memoryLimit());
+    QVERIFY(PhotoThumbnailCache::memoryCount() < 3);
+    PhotoThumbnailCache::clearMemory();
+    QCOMPARE(PhotoThumbnailCache::memoryCost(), 0);
+    QCOMPARE(PhotoThumbnailCache::memoryCount(), 0);
+    PhotoThumbnailCache::setMemoryLimit(previousLimit);
+}
+
+void TestThumbnails::photoProviderReleasesMemoryOnDestruction()
+{
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("lifecycle.png"), 128, 128);
+    PhotoThumbnailCache::store(path, 256, ThumbnailCache::Version::of(path),
+                               ThumbnailCache::renderImageFile(path, 256));
+    QVERIFY(PhotoThumbnailCache::memoryCount() > 0);
+
+    {
+        PhotoThumbnailProvider provider;
+    }
+
+    QCOMPARE(PhotoThumbnailCache::memoryCount(), 0);
 }
 
 QTEST_MAIN(TestThumbnails)

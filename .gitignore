@@ -9,3 +9,4 @@ verify-ui.sh
 verify-mouse.sh
 tools/
 spike/
+assets/

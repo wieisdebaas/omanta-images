@@ -77,6 +77,7 @@ void TestSettings::settersPersistAcrossInstances()
         settings.setDateTimeFormat(QStringLiteral("detailed"));
         settings.setShowHiddenFiles(true);
         settings.setShowSidebar(false);
+        settings.setDefaultViewMode(QStringLiteral("photo"));
     }
 
     Settings reread;
@@ -85,6 +86,7 @@ void TestSettings::settersPersistAcrossInstances()
     QCOMPARE(reread.dateTimeFormat(), QStringLiteral("detailed"));
     QCOMPARE(reread.showHiddenFiles(), true);
     QCOMPARE(reread.showSidebar(), false);
+    QCOMPARE(reread.defaultViewMode(), QStringLiteral("photo"));
     // Untouched keys still answer their defaults.
     QCOMPARE(reread.showThumbnails(), QStringLiteral("local-only"));
 }

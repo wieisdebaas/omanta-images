@@ -29,7 +29,8 @@ FocusScope {
     // The model the views and every helper below speak to. The two carry the
     // same roles and the same invokable surface, so nothing downstream knows
     // which is live.
-    readonly property var files: treeActive ? treeModel : proxy
+    readonly property var files: viewMode === "photo" ? photoProxy
+                                : treeActive ? treeModel : proxy
     readonly property alias history: history
     readonly property string title: path === "/" ? "/" : Platform.baseName(path)
     readonly property int selectionCount: Object.keys(selectedNames).length
@@ -43,6 +44,14 @@ FocusScope {
                 return "Searching — " + found + " so far";
             return searchModel.capped ? found + " (stopped early — narrow the search)"
                                       : found;
+        }
+        if (viewMode === "photo") {
+            if (photoModel.errorMessage)
+                return photoModel.errorMessage;
+            const photos = files.count === 1 ? "1 photo" : files.count + " photos";
+            if (photoModel.scanning)
+                return "Scanning… " + photos;
+            return photoModel.capped ? photos + " (limit reached)" : photos;
         }
         if (dirModel.errorMessage)
             return dirModel.errorMessage;
@@ -67,6 +76,12 @@ FocusScope {
     // View state. The default follows the Settings store, which switching
     // views writes back — Nautilus's default-folder-viewer behaviour.
     property string viewMode: Settings.defaultViewMode
+    onViewModeChanged: {
+        if (viewMode === "photo") {
+            sortKey = FileSortFilterModel.ByModified;
+            sortDescending = true;
+        }
+    }
     // Remembered in Settings, so every tab and window shares one size per
     // view and it survives a restart.
     readonly property int iconZoom: Settings.iconZoom
@@ -187,6 +202,26 @@ FocusScope {
         foldersFirst: Settings.sortFoldersFirst
     }
 
+    // Recursive photo listing for Ctrl+3 — metadata only; thumbnails are
+    // decoded asynchronously by the photo image provider.
+    PhotoModel {
+        id: photoModel
+        path: root.viewingStarred || root.viewingNetwork ? "" : root.path
+        active: root.viewMode === "photo" && root.searchQuery === ""
+                && !root.viewingStarred && !root.viewingNetwork
+        showHidden: root.showHidden
+        onNeedsMount: location => root.mountNeeded(location)
+    }
+
+    FileSortFilterModel {
+        id: photoProxy
+        sourceModel: photoModel
+        showHidden: true // PhotoModel already applied the hidden policy
+        sortKey: root.sortKey
+        sortDescending: root.sortDescending
+        foldersFirst: false
+    }
+
     DirectoryTreeModel {
         id: treeModel
         // The tab's own dirModel is the root — one listing, one monitor,
@@ -202,7 +237,13 @@ FocusScope {
         id: history
     }
 
-    Component.onCompleted: history.visit(root.path)
+    Component.onCompleted: {
+        history.visit(root.path)
+        if (root.viewMode === "photo") {
+            sortKey = FileSortFilterModel.ByModified
+            sortDescending = true
+        }
+    }
 
     onPathChanged: {
         clearSelection();
@@ -326,7 +367,10 @@ FocusScope {
         }
     }
 
-    function reload() { dirModel.reload(); }
+    function reload() {
+        dirModel.reload();
+        photoModel.reload();
+    }
 
     // Quick Look (Space): the one selected item, or the current row, in the
     // system previewer. `toggle` makes a second Space close it.
@@ -360,7 +404,7 @@ FocusScope {
         target: Previewer
         enabled: Previewer.owner === root
         function onSelectionEvent(direction) {
-            const vertical = root.viewMode === "icon" ? root.viewColumns : 1;
+            const vertical = root.viewMode !== "list" ? root.viewColumns : 1;
             const step = [1, -1, -vertical, vertical, -1, 1][direction];
             // From the item being previewed — the keyboard cursor may sit
             // elsewhere after a click.
@@ -591,7 +635,7 @@ FocusScope {
     }
 
     // Columns only mean something in the grid; the list is one per row.
-    readonly property int viewColumns: viewMode === "icon" && viewLoader.item
+    readonly property int viewColumns: viewMode !== "list" && viewLoader.item
                                        ? viewLoader.item.columns : 1
 
     // The list view's live column ids — what is actually rendered, not what
@@ -635,7 +679,7 @@ FocusScope {
         case Qt.Key_Up:
             moveCurrent(-viewColumns, extend); event.accepted = true; return;
         case Qt.Key_Right:
-            if (viewMode === "icon") { moveCurrent(1, extend); event.accepted = true; }
+            if (viewMode !== "list") { moveCurrent(1, extend); event.accepted = true; }
             else if (treeActive && currentIndex >= 0) {
                 // GTK tree keys: Right expands a folder; on one already
                 // expanded it steps into the first child.
@@ -648,7 +692,7 @@ FocusScope {
             }
             return;
         case Qt.Key_Left:
-            if (viewMode === "icon") { moveCurrent(-1, extend); event.accepted = true; }
+            if (viewMode !== "list") { moveCurrent(-1, extend); event.accepted = true; }
             else if (treeActive && currentIndex >= 0) {
                 // …and Left collapses, or from a plain row jumps to its parent.
                 if (files.valueAt(currentIndex, "expanded"))
@@ -721,7 +765,8 @@ FocusScope {
 
         anchors.fill: parent
         focus: true
-        sourceComponent: root.viewMode === "icon" ? iconViewComponent : listViewComponent
+        sourceComponent: root.viewMode === "photo" ? photoViewComponent
+                   : root.viewMode === "icon" ? iconViewComponent : listViewComponent
     }
 
     Component {
@@ -732,6 +777,11 @@ FocusScope {
     Component {
         id: iconViewComponent
         FileIconView { tab: root; currentIndex: root.currentIndex }
+    }
+
+    Component {
+        id: photoViewComponent
+        PhotoGridView { tab: root; currentIndex: root.currentIndex }
     }
 
     // Nautilus's Network empty state — without it, an empty network view is
