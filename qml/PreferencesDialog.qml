@@ -61,6 +61,9 @@ Dialog {
         foldersFirstSwitch.checked = Settings.sortFoldersFirst;
         showHiddenSwitch.checked = Settings.showHiddenFiles;
         clickCombo.currentIndex = Settings.clickPolicy === "single" ? 1 : 0;
+        const viewModes = ["list", "icon", "photo"];
+        const viewAt = viewModes.indexOf(Settings.defaultViewMode);
+        viewModeCombo.currentIndex = viewAt >= 0 ? viewAt : 1;
         treeViewSwitch.checked = Settings.useTreeView;
         createLinkSwitch.checked = Settings.showCreateLink;
         deletePermanentlySwitch.checked = Settings.showDeletePermanently;
@@ -220,6 +223,19 @@ Dialog {
                     id: clickCombo
                     model: [qsTr("Double-Click"), qsTr("Single-Click")]
                     onActivated: Settings.clickPolicy = currentIndex === 1 ? "single" : "double"
+                }
+            }
+
+            PrefRow {
+                label: qsTr("Default View")
+                PrefComboBox {
+                    id: viewModeCombo
+                    // Matches Ctrl+1 / Ctrl+2 / Ctrl+3. Switching views from
+                    // the toolbar also writes this, so the next window opens
+                    // where you left off.
+                    model: [qsTr("List"), qsTr("Tiles"), qsTr("Photo")]
+                    onActivated: Settings.defaultViewMode =
+                        ["list", "icon", "photo"][currentIndex]
                 }
             }
 
