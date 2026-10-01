@@ -258,6 +258,14 @@ Window {
                 }
 
                 ToolbarButton {
+                    symbol: "↑"
+                    tip: "Up (Alt+Up)"
+                    enabled: root.currentTab
+                             && Platform.parentPath(root.currentTab.path) !== ""
+                    onTriggered: root.currentTab.goUp()
+                }
+
+                ToolbarButton {
                     symbol: "←"
                     tip: "Back (Alt+Left)"
                     enabled: root.currentTab && root.currentTab.history.canGoBack
