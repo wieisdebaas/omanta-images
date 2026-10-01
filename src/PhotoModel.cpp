@@ -3,6 +3,9 @@
 #include "DirectoryModel.h"
 #include "Location.h"
 
+#include <QFileInfo>
+#include <QStandardPaths>
+
 namespace {
 
 constexpr int kBatchSize = 256;
@@ -11,6 +14,29 @@ constexpr int kMaxPhotos = 10000;
 constexpr int kMaxVisitedDirs = 2000;
 constexpr int kMaxDepth = 20;
 constexpr int kFlushBatch = 64;
+
+// Recursive walks from $HOME otherwise pick up omanta's own photo-thumbnail
+// cache (and the freedesktop one) as if they were albums — Open Containing
+// Folder then lands in ~/.cache/….
+bool isThumbnailCacheLocation(const QString &location)
+{
+    if (location.isEmpty() || !Location::isLocal(location))
+        return false;
+
+    const QString path = QFileInfo(Location::clean(location)).absoluteFilePath();
+    const QString cacheHome =
+        QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    const QStringList roots = {
+        cacheHome + QStringLiteral("/omanta/photo-thumbnails"),
+        cacheHome + QStringLiteral("/thumbnails"),
+    };
+    for (const QString &root : roots) {
+        const QString abs = QFileInfo(root).absoluteFilePath();
+        if (path == abs || path.startsWith(abs + QLatin1Char('/')))
+            return true;
+    }
+    return false;
+}
 
 } // namespace
 
@@ -315,15 +341,18 @@ void PhotoModel::consume(GList *infos, const QString &relPrefix, int depth)
             continue;
 
         const QString relPath = relPrefix + entry.name;
+        const QString absolute = Location::descend(m_path, relPath);
 
         if (entry.isDir && !entry.isSymlink && depth < kMaxDepth
             && m_visitedDirs < kMaxVisitedDirs
-            && m_results.size() + m_pending.size() < kMaxPhotos) {
-            GFile *child = Location::make(Location::descend(m_path, relPath));
+            && m_results.size() + m_pending.size() < kMaxPhotos
+            && !isThumbnailCacheLocation(absolute)) {
+            GFile *child = Location::make(absolute);
             m_queue.append({ child, relPath + QLatin1Char('/'), depth + 1 });
         }
 
-        if (!entry.isDir && entry.contentType.startsWith(QLatin1String("image/")))
+        if (!entry.isDir && entry.contentType.startsWith(QLatin1String("image/"))
+            && !isThumbnailCacheLocation(Location::parent(absolute)))
             m_pending.append({ std::move(entry), relPath });
     }
 

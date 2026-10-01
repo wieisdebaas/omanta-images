@@ -100,6 +100,8 @@ public:
     static qint64 memoryCost();
     static int memoryCount();
     static void clearMemory();
+    // Wipe ~/.cache/omanta/photo-thumbnails and the in-memory LRU.
+    static void clearAll();
 };
 
 class PhotoThumbnailProvider : public QQuickAsyncImageProvider
@@ -151,6 +153,8 @@ public:
                                     qint64 fileSize, int requestedSize,
                                     int priority = 0) const;
     Q_INVOKABLE QString originalSource(const QString &filePath) const;
+    // Preferences: wipe the Ctrl+3 photo thumbnail disk + RAM cache.
+    Q_INVOKABLE void clearPhotoCache() const;
     // The inverse, as the provider sees it: the file path an id names, and
     // optionally the version of it the id asks for (a zero mtime means
     // "whatever is there": remote rows may not report one).

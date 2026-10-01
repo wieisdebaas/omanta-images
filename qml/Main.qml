@@ -984,13 +984,12 @@ Window {
 
     function selection() { return currentTab ? currentTab.selectedPaths() : []; }
 
-    // Switching views also persists the choice as the default for new tabs
-    // and windows — Nautilus writes default-folder-viewer the same way.
+    // Session-only switch. The default for new windows/tabs is Preferences →
+    // Default View (Settings.defaultViewMode), not the last Ctrl+1/2/3 used.
     function setViewMode(mode) {
         if (!currentTab)
             return;
         currentTab.viewMode = mode;
-        Settings.defaultViewMode = mode;
     }
 
     // A modal dialog takes the keyboard; nothing gives it back automatically.
@@ -1821,10 +1820,15 @@ Window {
             text: "Open in New Tab"
             enabled: root.currentTab && root.currentTab.selectionCount === 1
             onTriggered: {
-                const selected = root.currentTab.selectedPaths();
-                if (selected.length !== 1)
+                if (!root.currentTab || root.currentTab.selectionCount !== 1)
                     return;
-                const path = selected[0];
+                const name = Object.keys(root.currentTab.selectedNames)[0];
+                const row = root.currentTab.files.proxyRowForName(name);
+                if (row < 0)
+                    return;
+                const path = root.currentTab.files.valueAt(row, "filePath");
+                if (!path)
+                    return;
                 if (Platform.isDir(path)) {
                     root.addTab(path);
                     return;
@@ -1845,11 +1849,16 @@ Window {
                      && root.viewMode === "photo"
             height: visible ? implicitHeight : 0
             onTriggered: {
-                const selected = root.currentTab.selectedPaths();
-                if (selected.length !== 1)
+                if (!root.currentTab || root.currentTab.selectionCount !== 1)
                     return;
-                const path = selected[0];
-                if (Platform.isDir(path))
+                // Use filePath (the real photo), never a thumbnail-cache path
+                // that might sneak in via selection helpers.
+                const name = Object.keys(root.currentTab.selectedNames)[0];
+                const row = root.currentTab.files.proxyRowForName(name);
+                if (row < 0)
+                    return;
+                const path = root.currentTab.files.valueAt(row, "filePath");
+                if (!path || Platform.isDir(path))
                     return;
                 const parent = Platform.parentPath(path);
                 if (!parent)

@@ -230,9 +230,9 @@ Dialog {
                 label: qsTr("Default View")
                 PrefComboBox {
                     id: viewModeCombo
-                    // Matches Ctrl+1 / Ctrl+2 / Ctrl+3. Switching views from
-                    // the toolbar also writes this, so the next window opens
-                    // where you left off.
+                    // Matches Ctrl+1 / Ctrl+2 / Ctrl+3. Only this setting
+                    // decides the view for the next window — keyboard
+                    // switches stay session-only.
                     model: [qsTr("List"), qsTr("Tiles"), qsTr("Photo")]
                     onActivated: Settings.defaultViewMode =
                         ["list", "icon", "photo"][currentIndex]
@@ -320,6 +320,30 @@ Dialog {
                     id: thumbnailsCombo
                     model: root.policyLabels
                     onActivated: Settings.showThumbnails = root.policyValues[currentIndex]
+                }
+            }
+
+            PrefRow {
+                label: qsTr("Photo Thumbnail Cache")
+                Button {
+                    id: clearCacheButton
+                    property bool cleared: false
+                    text: cleared ? qsTr("Cleared") : qsTr("Clear Cache")
+                    Layout.minimumWidth: root.controlWidth
+                    Layout.preferredWidth: root.controlWidth
+                    Layout.maximumWidth: root.controlWidth
+                    implicitHeight: 32
+                    font.pixelSize: 13
+                    onClicked: {
+                        Thumbnails.clearPhotoCache();
+                        cleared = true;
+                        clearCacheReset.restart();
+                    }
+                    Timer {
+                        id: clearCacheReset
+                        interval: 2000
+                        onTriggered: clearCacheButton.cleared = false
+                    }
                 }
             }
 
