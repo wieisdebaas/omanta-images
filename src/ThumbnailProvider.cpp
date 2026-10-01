@@ -1,6 +1,9 @@
 #include "ThumbnailProvider.h"
 
+#include "Location.h"
+
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -9,9 +12,11 @@
 #include <QFileInfo>
 #include <QImageReader>
 #include <QImageWriter>
-#include <QProcess>
-#include <QCoreApplication>
+#include <QMimeDatabase>
+#include <QMutex>
 #include <QPointer>
+#include <QProcess>
+#include <QStorageInfo>
 #include <QQuickImageResponse>
 #include <QRunnable>
 #include <QSaveFile>
@@ -26,6 +31,17 @@
 #include <atomic>
 #include <limits>
 #include <memory>
+#include <mutex>
+
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+
+// Test seam: a cancelled response must still persist a decode that already
+// finished. The suite pauses the worker between render and store.
+namespace OmantaThumbnailTest {
+std::atomic<bool> *g_pauseBeforePhotoStore = nullptr;
+std::atomic<bool> *g_reachedBeforePhotoStore = nullptr;
+}
 
 namespace {
 
@@ -35,6 +51,30 @@ QHash<QString, QStringList> g_thumbnailers; // mime type → argv template
 QMutex g_photoCacheMutex;
 QCache<QString, QImage> g_photoMemoryCache;
 qint64 g_photoMemoryLimit = PhotoThumbnailCache::DefaultMemoryLimit;
+QMutex g_photoPriorityMutex;
+QHash<QString, int> g_photoPriority;
+PhotoThumbnailProvider *g_photoProvider = nullptr;
+QMutex g_ioClientsMutex;
+QHash<QObject *, bool> g_ioClients;
+
+bool anyPhotoIoClientSlow()
+{
+    for (auto it = g_ioClients.cbegin(); it != g_ioClients.cend(); ++it) {
+        if (it.value())
+            return true;
+    }
+    return false;
+}
+
+void applyPhotoIoBound()
+{
+    if (!g_photoProvider)
+        return;
+    QMutexLocker lock(&g_ioClientsMutex);
+    const bool bound = anyPhotoIoClientSlow();
+    lock.unlock();
+    g_photoProvider->setIoBound(bound);
+}
 
 QString thumbnailRoot()
 {
@@ -57,11 +97,10 @@ QString uriFor(const QString &filePath)
 
 QString photoKey(const QString &filePath, int bucket, const ThumbnailCache::Version &version)
 {
-    QFileInfo info(filePath);
-    QString canonical = info.canonicalFilePath();
-    if (canonical.isEmpty())
-        canonical = info.absoluteFilePath();
-    const QByteArray identity = canonical.toUtf8() + '\0'
+    // Paths from the directory/photo models are already absolute. canonicalFilePath()
+    // is a realpath syscall — catastrophic on SMB/gvfs/external disks when paid
+    // per thumbnail.
+    const QByteArray identity = filePath.toUtf8() + '\0'
         + QByteArray::number(version.size) + '\0'
         + QByteArray::number(version.modifiedMSecs) + '\0'
         + QByteArray::number(bucket);
@@ -335,10 +374,14 @@ QStringList ThumbnailCache::commandFor(const QString &mimeType)
 
 QString ThumbnailCache::contentTypeOf(const QString &filePath)
 {
-    // g_content_type_guess() with no data looks only at the extension, so a
-    // valid PNG saved without one came back as application/octet-stream and
-    // never got a thumbnail. query_info sniffs the contents, which is also what
-    // the directory model does — so the two agree.
+    // Extension first: most album photos are image/jpeg etc. Gio sniffing is a
+    // full query_info round-trip and dominated external-disk thumbnailing.
+    QMimeDatabase db;
+    const QMimeType byExtension = db.mimeTypeForFile(filePath, QMimeDatabase::MatchExtension);
+    if (byExtension.name().startsWith(QLatin1String("image/")))
+        return byExtension.name();
+
+    // Extensionless or unknown: sniff contents (same as the directory model).
     QString mimeType;
     GFile *file = g_file_new_for_path(filePath.toUtf8().constData());
     if (GFileInfo *info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
@@ -348,7 +391,9 @@ QString ThumbnailCache::contentTypeOf(const QString &filePath)
         g_object_unref(info);
     }
     g_object_unref(file);
-    return mimeType;
+    if (!mimeType.isEmpty())
+        return mimeType;
+    return byExtension.name();
 }
 
 QImage ThumbnailCache::render(const QString &filePath, const QString &mimeType, int size)
@@ -385,9 +430,21 @@ QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
     if (image.isNull())
         return {};
 
-    if (image.width() > size || image.height() > size)
-        image = image.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (image.width() > size || image.height() > size) {
+        image = image.scaled(size, size, Qt::KeepAspectRatio,
+                              ThumbnailCache::scaleModeFor(image.size(), size));
+    }
     return image;
+}
+
+Qt::TransformationMode ThumbnailCache::scaleModeFor(const QSize &decoded, int target)
+{
+    // setScaledSize already asked the decoder for roughly `target`. What remains
+    // within 2× is a small cleanup and worth smoothing. A decoder that ignored
+    // the hint returns the full frame, and smooth filtering that is the cost.
+    if (target > 0 && decoded.width() <= target * 2 && decoded.height() <= target * 2)
+        return Qt::SmoothTransformation;
+    return Qt::FastTransformation;
 }
 
 QImage ThumbnailCache::renderViaThumbnailer(const QString &filePath, const QString &mimeType, int size)
@@ -538,12 +595,14 @@ public:
         // so render again until the file holds still.
         QImage generated;
         ThumbnailCache::Version version;
+        const QString mimeType = ThumbnailCache::contentTypeOf(m_filePath);
         for (int attempt = 0; attempt < 3; ++attempt) {
             if (m_cancelled->load(std::memory_order_acquire))
                 return;
             version = ThumbnailCache::Version::of(m_filePath);
-            const QString mimeType = ThumbnailCache::contentTypeOf(m_filePath);
             generated = ThumbnailCache::render(m_filePath, mimeType, m_bucket);
+            if (m_cancelled->load(std::memory_order_acquire))
+                return;
             if (ThumbnailCache::Version::of(m_filePath) == version) {
                 if (generated.isNull())
                     ThumbnailCache::markFailed(m_filePath, version);
@@ -581,6 +640,19 @@ private:
 
 } // namespace
 
+QThreadPool *ThumbnailProvider::threadPool()
+{
+    static QThreadPool pool;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // Cap well below idealThreadCount: 16 parallel JPEG decodes thrash a
+        // spinning disk and fight the photo pool for IO.
+        pool.setMaxThreadCount(qMax(2, qMin(6, QThread::idealThreadCount())));
+        pool.setExpiryTimeout(30000);
+    });
+    return &pool;
+}
+
 QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
                                                              const QSize &requestedSize)
 {
@@ -588,7 +660,7 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
     ThumbnailCache::Version expected;
     const QString path = Thumbnails::pathFromId(id, &expected);
     auto *response = new ThumbnailResponse(path, expected, size);
-    QThreadPool::globalInstance()->start(new ThumbnailJob(response));
+    threadPool()->start(new ThumbnailJob(response));
     return response;
 }
 
@@ -620,15 +692,17 @@ QString PhotoThumbnailCache::cachePathFor(const QString &filePath, int bucket,
 QImage PhotoThumbnailCache::load(const QString &filePath, int bucket,
                                  const ThumbnailCache::Version &version)
 {
-    if (!(ThumbnailCache::Version::of(filePath) == version))
-        return {};
-
+    // Version comes from the image URL. Trust it for the RAM key; only re-stat
+    // when reading disk so a stale on-disk file is not served after an edit.
     const QString key = photoKey(filePath, bucket, version);
     {
         QMutexLocker lock(&g_photoCacheMutex);
         if (QImage *cached = g_photoMemoryCache.object(key))
             return *cached;
     }
+
+    if (!(ThumbnailCache::Version::of(filePath) == version))
+        return {};
 
     QImage image(cachePathFor(filePath, bucket, version));
     if (image.isNull())
@@ -640,8 +714,21 @@ QImage PhotoThumbnailCache::load(const QString &filePath, int bucket,
     return image;
 }
 
-void PhotoThumbnailCache::store(const QString &filePath, int bucket,
-                                const ThumbnailCache::Version &version, const QImage &image)
+void PhotoThumbnailCache::storeMemory(const QString &filePath, int bucket,
+                                      const ThumbnailCache::Version &version,
+                                      const QImage &image)
+{
+    if (image.isNull())
+        return;
+    const QString key = photoKey(filePath, bucket, version);
+    QMutexLocker lock(&g_photoCacheMutex);
+    const int cost = int(qMin<qint64>(image.sizeInBytes(), std::numeric_limits<int>::max()));
+    g_photoMemoryCache.insert(key, new QImage(image), cost);
+}
+
+void PhotoThumbnailCache::storeDisk(const QString &filePath, int bucket,
+                                    const ThumbnailCache::Version &version,
+                                    const QImage &image)
 {
     if (image.isNull() || !(ThumbnailCache::Version::of(filePath) == version))
         return;
@@ -658,11 +745,13 @@ void PhotoThumbnailCache::store(const QString &filePath, int bucket,
         else
             output.cancelWriting();
     }
+}
 
-    const QString key = photoKey(filePath, bucket, version);
-    QMutexLocker lock(&g_photoCacheMutex);
-    const int cost = int(qMin<qint64>(image.sizeInBytes(), std::numeric_limits<int>::max()));
-    g_photoMemoryCache.insert(key, new QImage(image), cost);
+void PhotoThumbnailCache::store(const QString &filePath, int bucket,
+                                const ThumbnailCache::Version &version, const QImage &image)
+{
+    storeMemory(filePath, bucket, version, image);
+    storeDisk(filePath, bucket, version, image);
 }
 
 void PhotoThumbnailCache::setMemoryLimit(qint64 bytes)
@@ -764,8 +853,9 @@ void deliverPhotoThumbnail(const QPointer<PhotoThumbnailResponse> &response, QIm
 class PhotoThumbnailJob : public QRunnable
 {
 public:
-    explicit PhotoThumbnailJob(PhotoThumbnailResponse *response)
+    PhotoThumbnailJob(PhotoThumbnailResponse *response, PhotoThumbnailProvider *provider)
         : m_response(response)
+        , m_provider(provider)
         , m_cancelled(response->cancelFlag())
         , m_filePath(response->filePath())
         , m_version(response->version())
@@ -775,6 +865,13 @@ public:
 
     void run() override
     {
+        m_provider->noteDecodeStarted(m_filePath, this);
+        struct Finish {
+            PhotoThumbnailProvider *provider;
+            QString path;
+            ~Finish() { provider->noteDecodeFinished(path); }
+        } finish{m_provider, m_filePath};
+
         if (m_cancelled->load(std::memory_order_acquire))
             return;
 
@@ -799,12 +896,25 @@ public:
             return;
         }
 
-        PhotoThumbnailCache::store(m_filePath, m_bucket, m_version, image);
-        deliverPhotoThumbnail(m_response, std::move(image), {});
+        if (auto *reached = OmantaThumbnailTest::g_reachedBeforePhotoStore)
+            reached->store(true, std::memory_order_release);
+        if (auto *pause = OmantaThumbnailTest::g_pauseBeforePhotoStore) {
+            while (!pause->load(std::memory_order_acquire))
+                QThread::msleep(1);
+        }
+
+        // RAM + a queued GUI delivery first, so scrolling sees pixels before
+        // WebP hits the disk. The disk write still happens if the cell scrolled
+        // away: the decode is already paid for.
+        PhotoThumbnailCache::storeMemory(m_filePath, m_bucket, m_version, image);
+        if (!m_cancelled->load(std::memory_order_acquire))
+            deliverPhotoThumbnail(m_response, image, {});
+        PhotoThumbnailCache::storeDisk(m_filePath, m_bucket, m_version, image);
     }
 
 private:
     QPointer<PhotoThumbnailResponse> m_response;
+    PhotoThumbnailProvider *m_provider;
     std::shared_ptr<std::atomic_bool> m_cancelled;
     QString m_filePath;
     ThumbnailCache::Version m_version;
@@ -815,35 +925,128 @@ private:
 
 PhotoThumbnailProvider::PhotoThumbnailProvider()
 {
+    g_photoProvider = this;
     PhotoThumbnailCache::setMemoryLimit(PhotoThumbnailCache::DefaultMemoryLimit);
-    m_pool.setMaxThreadCount(qMax(2, qMin(4, QThread::idealThreadCount())));
     m_pool.setExpiryTimeout(30000);
+    {
+        QMutexLocker lock(&g_ioClientsMutex);
+        m_ioBound = anyPhotoIoClientSlow();
+    }
+    applyPoolLimits();
 }
 
 PhotoThumbnailProvider::~PhotoThumbnailProvider()
 {
+    if (g_photoProvider == this)
+        g_photoProvider = nullptr;
+    {
+        QMutexLocker lock(&m_queueMutex);
+        m_queued.clear();
+    }
     m_pool.clear();
     m_pool.waitForDone();
     PhotoThumbnailCache::clearMemory();
 }
 
+void PhotoThumbnailProvider::setIoBound(bool bound)
+{
+    if (m_ioBound == bound)
+        return;
+    m_ioBound = bound;
+    applyPoolLimits();
+}
+
+void PhotoThumbnailProvider::applyPoolLimits()
+{
+    const int ideal = QThread::idealThreadCount();
+    m_pool.setMaxThreadCount(m_ioBound ? 2 : qMax(2, qMin(4, ideal)));
+}
+
+void PhotoThumbnailProvider::noteDecodeStarted(const QString &filePath, QRunnable *job)
+{
+    QMutexLocker lock(&m_queueMutex);
+    auto queued = m_queued.find(filePath);
+    if (queued != m_queued.end()) {
+        QList<QueuedJob> &jobs = queued.value();
+        for (int i = 0; i < jobs.size(); ++i) {
+            if (jobs.at(i).job == job) {
+                jobs.removeAt(i);
+                break;
+            }
+        }
+        if (jobs.isEmpty())
+            m_queued.erase(queued);
+    }
+    m_decoding[filePath] += 1;
+}
+
+void PhotoThumbnailProvider::noteDecodeFinished(const QString &filePath)
+{
+    QMutexLocker lock(&m_queueMutex);
+    auto decoding = m_decoding.find(filePath);
+    if (decoding == m_decoding.end())
+        return;
+    if (decoding.value() <= 1)
+        m_decoding.erase(decoding);
+    else
+        --decoding.value();
+}
+
+void PhotoThumbnailProvider::reprioritize(const QString &filePath, int priority)
+{
+    QMutexLocker lock(&m_queueMutex);
+    auto queued = m_queued.find(filePath);
+    if (queued == m_queued.end())
+        return;
+    for (QueuedJob &entry : queued.value()) {
+        if (entry.priority == priority)
+            continue;
+        // Already running: tryTake fails and the in-flight decode is left alone.
+        if (!m_pool.tryTake(entry.job))
+            continue;
+        entry.priority = priority;
+        m_pool.start(entry.job, priority);
+    }
+}
+
+int PhotoThumbnailProvider::queuedPriority(const QString &filePath) const
+{
+    QMutexLocker lock(&m_queueMutex);
+    const auto queued = m_queued.constFind(filePath);
+    if (queued == m_queued.cend() || queued.value().isEmpty())
+        return -1;
+    return queued.value().constFirst().priority;
+}
+
+bool PhotoThumbnailProvider::isActive(const QString &filePath) const
+{
+    QMutexLocker lock(&m_queueMutex);
+    return m_queued.contains(filePath) || m_decoding.contains(filePath);
+}
+
 QQuickImageResponse *PhotoThumbnailProvider::requestImageResponse(const QString &id,
                                                                   const QSize &requestedSize)
 {
+    // id: "<bucket>/<mtime>-<size>/<path>" — priority is out-of-band.
     const QStringList parts = id.split(QLatin1Char('/'), Qt::KeepEmptyParts);
-    if (parts.size() < 4)
+    if (parts.size() < 3)
         return new PhotoThumbnailResponse({}, {}, 256);
 
-    const int priority = parts.at(0).toInt();
-    const int encodedSize = parts.at(1).toInt();
-    const QStringList version = parts.at(2).split(QLatin1Char('-'));
+    const int encodedSize = parts.at(0).toInt();
+    const QStringList version = parts.at(1).split(QLatin1Char('-'));
     ThumbnailCache::Version expected;
     if (version.size() == 2)
         expected = { version.at(0).toLongLong(), version.at(1).toLongLong() };
-    const QString path = QUrl::fromPercentEncoding(parts.mid(3).join(QLatin1Char('/')).toUtf8());
+    const QString path = QUrl::fromPercentEncoding(parts.mid(2).join(QLatin1Char('/')).toUtf8());
     const int size = requestedSize.width() > 0 ? requestedSize.width() : encodedSize;
+    const int priority = Thumbnails::photoPriorityFor(path);
     auto *response = new PhotoThumbnailResponse(path, expected, size);
-    m_pool.start(new PhotoThumbnailJob(response), priority);
+    auto *job = new PhotoThumbnailJob(response, this);
+    {
+        QMutexLocker lock(&m_queueMutex);
+        m_queued[path].append({job, priority});
+    }
+    m_pool.start(job, priority);
     return response;
 }
 
@@ -903,18 +1106,143 @@ QString Thumbnails::source(const QString &filePath, const QDateTime &modified,
 QString Thumbnails::photoSource(const QString &filePath, const QDateTime &modified,
                                 qint64 fileSize, int requestedSize, int priority) const
 {
+    notePhotoPriority(filePath, priority);
     const qint64 msecs = modified.isValid() ? modified.toMSecsSinceEpoch() : 0;
-    return QStringLiteral("image://photo/%1/%2/%3-%4/%5")
-        .arg(priority)
+    // Priority must NOT appear in the URL: viewport priority changes would
+    // otherwise cancel and restart every in-flight decode on scroll.
+    return QStringLiteral("image://photo/%1/%2-%3/%4")
         .arg(PhotoThumbnailCache::bucketFor(requestedSize))
         .arg(msecs)
         .arg(fileSize)
         .arg(QString::fromLatin1(QUrl::toPercentEncoding(filePath, "/")));
 }
 
+void Thumbnails::notePhotoPriority(const QString &filePath, int priority) const
+{
+    if (filePath.isEmpty())
+        return;
+    if (g_photoProvider)
+        g_photoProvider->reprioritize(filePath, priority);
+
+    QMutexLocker lock(&g_photoPriorityMutex);
+    g_photoPriority.insert(filePath, priority);
+    // Viewport priority is recorded for every cell that scrolls by. Drop paths
+    // that are neither queued nor decoding so a long session does not keep them.
+    if (g_photoPriority.size() <= 2048 || !g_photoProvider)
+        return;
+    QStringList drop;
+    for (auto it = g_photoPriority.cbegin(); it != g_photoPriority.cend(); ++it) {
+        if (it.key() == filePath || g_photoProvider->isActive(it.key()))
+            continue;
+        drop.append(it.key());
+    }
+    for (const QString &key : drop)
+        g_photoPriority.remove(key);
+}
+
+int Thumbnails::photoPriorityFor(const QString &filePath)
+{
+    QMutexLocker lock(&g_photoPriorityMutex);
+    return g_photoPriority.value(filePath, 50);
+}
+
 QString Thumbnails::originalSource(const QString &filePath) const
 {
     return QUrl::fromLocalFile(filePath).toString();
+}
+
+namespace {
+
+bool isNetworkFileSystem(const QByteArray &fs)
+{
+    return fs == "cifs" || fs == "smb2" || fs == "smbfs" || fs == "nfs" || fs == "nfs4"
+        || fs == "afs" || fs == "9p" || fs.startsWith("fuse.sshfs")
+        || fs.startsWith("fuse.rclone") || fs.startsWith("fuse.gvfs")
+        || fs.startsWith("fuse.davfs") || fs.startsWith("fuse.http");
+}
+
+// 1 rotational, 0 not, -1 if this sysfs node has no queue flag.
+int rotationalFlag(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return -1;
+    return file.peek(1) == "1" ? 1 : 0;
+}
+
+bool isRotational(const QStorageInfo &storage)
+{
+    const QByteArray device = storage.device();
+    if (!device.startsWith('/'))
+        return false;
+
+    struct stat info;
+    if (::stat(device.constData(), &info) != 0 || !S_ISBLK(info.st_mode))
+        return false;
+
+    const QString node = QStringLiteral("/sys/dev/block/%1:%2")
+                             .arg(gnu_dev_major(info.st_rdev))
+                             .arg(gnu_dev_minor(info.st_rdev));
+    const int own = rotationalFlag(node + QStringLiteral("/queue/rotational"));
+    if (own >= 0)
+        return own == 1;
+
+    // Partitions publish the flag on the parent disk, not on themselves.
+    const QString resolved = QFileInfo(node).canonicalFilePath();
+    if (resolved.isEmpty())
+        return false;
+    return rotationalFlag(QDir::cleanPath(resolved + QStringLiteral("/../queue/rotational"))) == 1;
+}
+
+} // namespace
+
+bool Thumbnails::isSlowStorage(const QString &location) const
+{
+    if (location.isEmpty())
+        return false;
+    if (!Location::isLocal(location))
+        return true; // smb://, sftp://, …
+
+    const QString path = Location::clean(location);
+    if (path.contains(QLatin1String("/gvfs/")))
+        return true;
+
+    const QFileInfo info(path);
+    if (info.exists()) {
+        const QStorageInfo storage(info.isDir() ? info.absoluteFilePath()
+                                                 : info.absolutePath());
+        if (isNetworkFileSystem(storage.fileSystemType()) || isRotational(storage))
+            return true;
+        // Mounted SSD, including one plugged in under /run/media or /mnt.
+        return false;
+    }
+
+    // Nothing to stat yet: removable mountpoints are the usual slow case.
+    // /mnt is not — it is a normal place for an internal volume.
+    return path.startsWith(QLatin1String("/run/media/"))
+        || path.startsWith(QLatin1String("/media/"));
+}
+
+void Thumbnails::bindPhotoIo(QObject *view, bool slow) const
+{
+    if (!view)
+        return;
+
+    {
+        QMutexLocker lock(&g_ioClientsMutex);
+        const bool first = !g_ioClients.contains(view);
+        g_ioClients.insert(view, slow);
+        if (first) {
+            QObject::connect(view, &QObject::destroyed, [](QObject *dead) {
+                {
+                    QMutexLocker lock(&g_ioClientsMutex);
+                    g_ioClients.remove(dead);
+                }
+                applyPhotoIoBound();
+            });
+        }
+    }
+    applyPhotoIoBound();
 }
 
 void Thumbnails::clearPhotoCache() const
