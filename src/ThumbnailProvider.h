@@ -4,6 +4,7 @@
 #include <QCache>
 #include <QHash>
 #include <QImage>
+#include <QList>
 #include <QMutex>
 #include <QObject>
 #include <QQuickAsyncImageProvider>
@@ -70,6 +71,8 @@ public:
     static QImage render(const QString &filePath, const QString &mimeType, int size);
     static QImage renderImageFile(const QString &filePath, int size);
     static QImage renderViaThumbnailer(const QString &filePath, const QString &mimeType, int size);
+    // Smooth when the decoder already came close; fast when it returned the full frame.
+    static Qt::TransformationMode scaleModeFor(const QSize &decoded, int target);
 
 private:
     static void ensureRegistryLoaded();
@@ -79,6 +82,9 @@ class ThumbnailProvider : public QQuickAsyncImageProvider
 {
 public:
     QQuickImageResponse *requestImageResponse(const QString &id, const QSize &requestedSize) override;
+    // Dedicated pool (not the process-wide global) so icon thumbs cannot
+    // saturate every core while photo decode is also running.
+    static QThreadPool *threadPool();
 };
 
 class PhotoThumbnailCache
@@ -92,8 +98,14 @@ public:
                                 const ThumbnailCache::Version &version);
     static QImage load(const QString &filePath, int bucket,
                        const ThumbnailCache::Version &version);
+    // RAM first (cheap, scroll-back), then disk. Callers that already
+    // delivered the pixels to the UI can write disk alone.
     static void store(const QString &filePath, int bucket,
                       const ThumbnailCache::Version &version, const QImage &image);
+    static void storeMemory(const QString &filePath, int bucket,
+                            const ThumbnailCache::Version &version, const QImage &image);
+    static void storeDisk(const QString &filePath, int bucket,
+                          const ThumbnailCache::Version &version, const QImage &image);
 
     static void setMemoryLimit(qint64 bytes);
     static qint64 memoryLimit();
@@ -113,8 +125,34 @@ public:
     QQuickImageResponse *requestImageResponse(const QString &id,
                                               const QSize &requestedSize) override;
 
+    // Bound IO on spinning disks / network filesystems: fewer concurrent reads.
+    void setIoBound(bool bound);
+    bool ioBound() const { return m_ioBound; }
+    QThreadPool *threadPool() { return &m_pool; }
+
+    // Move a not-yet-started decode to `priority` without cancelling it.
+    // -1 when nothing for this path is still waiting in the pool.
+    void reprioritize(const QString &filePath, int priority);
+    int queuedPriority(const QString &filePath) const;
+    // Queued or currently decoding — the priority map may keep these paths.
+    bool isActive(const QString &filePath) const;
+
+    void noteDecodeStarted(const QString &filePath, QRunnable *job);
+    void noteDecodeFinished(const QString &filePath);
+
 private:
+    struct QueuedJob {
+        QRunnable *job = nullptr;
+        int priority = 0;
+    };
+
+    void applyPoolLimits();
+
     QThreadPool m_pool;
+    mutable QMutex m_queueMutex;
+    QHash<QString, QList<QueuedJob>> m_queued;
+    QHash<QString, int> m_decoding;
+    bool m_ioBound = false;
 };
 
 // What QML needs to decide whether to even ask for a thumbnail.
@@ -149,16 +187,26 @@ public:
     // names containing '#', '?' or '%' are not read as URL syntax.
     Q_INVOKABLE QString source(const QString &filePath, const QDateTime &modified,
                                qint64 fileSize) const;
+    // Priority is recorded out-of-band so changing viewport priority does not
+    // change the URL (and cancel/restart an in-flight decode).
     Q_INVOKABLE QString photoSource(const QString &filePath, const QDateTime &modified,
                                     qint64 fileSize, int requestedSize,
                                     int priority = 0) const;
+    Q_INVOKABLE void notePhotoPriority(const QString &filePath, int priority) const;
     Q_INVOKABLE QString originalSource(const QString &filePath) const;
+    // Network URIs, gvfs, spinning disks, and not-yet-mounted /media paths.
+    // A mounted SSD (including under /run/media) stays fast.
+    Q_INVOKABLE bool isSlowStorage(const QString &location) const;
+    // Register one photo grid. The shared pool is IO-bound while any live
+    // client says so; destroying `view` drops its claim.
+    Q_INVOKABLE void bindPhotoIo(QObject *view, bool slow) const;
     // Preferences: wipe the Ctrl+3 photo thumbnail disk + RAM cache.
     Q_INVOKABLE void clearPhotoCache() const;
     // The inverse, as the provider sees it: the file path an id names, and
     // optionally the version of it the id asks for (a zero mtime means
     // "whatever is there": remote rows may not report one).
     static QString pathFromId(const QString &id, ThumbnailCache::Version *version = nullptr);
+    static int photoPriorityFor(const QString &filePath);
 
 Q_SIGNALS:
     void enabledChanged();

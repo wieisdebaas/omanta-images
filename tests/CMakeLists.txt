@@ -53,6 +53,7 @@ target_compile_definitions(tst_qmltext PRIVATE OMANTA_QML_DIR="${CMAKE_SOURCE_DI
 
 omanta_test(tst_thumbnails
     ${CMAKE_SOURCE_DIR}/src/ThumbnailProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/Location.cpp
 )
 
 omanta_test(tst_properties

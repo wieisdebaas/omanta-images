@@ -2,17 +2,27 @@
 #include "ThumbnailProvider.h"
 
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QImage>
 #include <QPainter>
+#include <QRunnable>
+#include <QSemaphore>
 #include <QStandardPaths>
 #include <QQuickImageResponse>
 #include <QSignalSpy>
 #include <QTest>
+#include <QThread>
 #include <QThreadPool>
 #include <QUrl>
 
+#include <atomic>
 #include <memory>
+
+namespace OmantaThumbnailTest {
+extern std::atomic<bool> *g_pauseBeforePhotoStore;
+extern std::atomic<bool> *g_reachedBeforePhotoStore;
+}
 
 // Thumbnails, tested against the freedesktop spec rather than against my
 // assumptions about it. Two of these exist because the first working build got
@@ -48,6 +58,12 @@ private Q_SLOTS:
     void photoProviderReleasesMemoryOnDestruction();
     void providerSurvivesResponseDestructionWhileRunning();
     void photoProviderSurvivesResponseDestructionWhileRunning();
+    void photoSourceUrlIgnoresPriority();
+    void slowStorageDetectsRemovableAndRemote();
+    void scaleModeSmoothsAResidualAndIsFastForAFullFrame();
+    void queuedPhotoPriorityFollowsTheViewport();
+    void cancelledDecodeStillWritesTheDiskCache();
+    void photoIoBoundTracksLiveViews();
 
 private:
     static QString writeImage(const TempTree &tree, const QString &name, int w, int h)
@@ -404,7 +420,7 @@ void TestThumbnails::providerSurvivesResponseDestructionWhileRunning()
         delete response;
     }
 
-    QVERIFY(QThreadPool::globalInstance()->waitForDone(60000));
+    QVERIFY(ThumbnailProvider::threadPool()->waitForDone(60000));
 }
 
 void TestThumbnails::photoProviderSurvivesResponseDestructionWhileRunning()
@@ -427,6 +443,161 @@ void TestThumbnails::photoProviderSurvivesResponseDestructionWhileRunning()
             delete response;
         }
     }
+}
+
+void TestThumbnails::photoSourceUrlIgnoresPriority()
+{
+    Thumbnails thumbnails;
+    const QDateTime when = QDateTime::fromMSecsSinceEpoch(1700000000123);
+    const QString path = QStringLiteral("/tmp/album/shot.jpg");
+    const QString low = thumbnails.photoSource(path, when, 42, 256, 10);
+    const QString high = thumbnails.photoSource(path, when, 42, 256, 100);
+    QCOMPARE(low, high);
+    QVERIFY2(!low.contains(QStringLiteral("/10/")) && !low.contains(QStringLiteral("/100/")),
+             qPrintable(low));
+    QCOMPARE(Thumbnails::photoPriorityFor(path), 100);
+
+    const QString id = QUrl(low).toString(QUrl::RemoveScheme | QUrl::RemoveAuthority).mid(1);
+    QVERIFY(id.startsWith(QStringLiteral("256/")));
+    PhotoThumbnailProvider provider;
+    std::unique_ptr<QQuickImageResponse> response(
+        provider.requestImageResponse(id, QSize(256, 256)));
+    // Missing file → finished with an error, but must parse the new URL shape.
+    QSignalSpy finished(response.get(), &QQuickImageResponse::finished);
+    QVERIFY(finished.wait(5000));
+    QCOMPARE(response->errorString(), QStringLiteral("could not render"));
+}
+
+void TestThumbnails::slowStorageDetectsRemovableAndRemote()
+{
+    Thumbnails thumbnails;
+    QVERIFY(thumbnails.isSlowStorage(QStringLiteral("smb://server/share")));
+    QVERIFY(thumbnails.isSlowStorage(QStringLiteral("/run/media/robin/EXTERNE HD/photos")));
+    QVERIFY(thumbnails.isSlowStorage(QStringLiteral("/run/user/1000/gvfs/smb-share:server=x")));
+    QVERIFY(!thumbnails.isSlowStorage(QStringLiteral("/home/robin/Pictures")));
+    // Absent /mnt is not a removable disk. A mounted SSD is classified from sysfs.
+    QVERIFY(!thumbnails.isSlowStorage(QStringLiteral("/mnt/data/photos")));
+    QVERIFY(!thumbnails.isSlowStorage(QDir::tempPath()));
+}
+
+void TestThumbnails::scaleModeSmoothsAResidualAndIsFastForAFullFrame()
+{
+    QCOMPARE(ThumbnailCache::scaleModeFor(QSize(300, 200), 256), Qt::SmoothTransformation);
+    QCOMPARE(ThumbnailCache::scaleModeFor(QSize(512, 512), 256), Qt::SmoothTransformation);
+    QCOMPARE(ThumbnailCache::scaleModeFor(QSize(6000, 4000), 256), Qt::FastTransformation);
+}
+
+void TestThumbnails::queuedPhotoPriorityFollowsTheViewport()
+{
+    PhotoThumbnailProvider provider;
+    provider.threadPool()->setMaxThreadCount(1);
+
+    class PoolBlocker : public QRunnable {
+    public:
+        QSemaphore entered;
+        QSemaphore release;
+        void run() override
+        {
+            entered.release();
+            release.acquire();
+        }
+    };
+    auto *blocker = new PoolBlocker;
+    provider.threadPool()->start(blocker, 1000);
+    QVERIFY(blocker->entered.tryAcquire(1, 5000));
+
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("queued.png"), 64, 64);
+    const QFileInfo info(path);
+    Thumbnails thumbnails;
+    const QString source = thumbnails.photoSource(path, info.lastModified(), info.size(), 256, 10);
+    const QString id = QUrl(source).toString(QUrl::RemoveScheme | QUrl::RemoveAuthority).mid(1);
+    std::unique_ptr<QQuickImageResponse> response(
+        provider.requestImageResponse(id, QSize(256, 256)));
+    QCOMPARE(provider.queuedPriority(path), 10);
+
+    // Scrolling the cell into view, then away, then back, retargets the
+    // queued decode. It must not cancel and restart from the file.
+    thumbnails.notePhotoPriority(path, 100);
+    QCOMPARE(provider.queuedPriority(path), 100);
+    thumbnails.notePhotoPriority(path, 10);
+    QCOMPARE(provider.queuedPriority(path), 10);
+    thumbnails.notePhotoPriority(path, 100);
+    QCOMPARE(provider.queuedPriority(path), 100);
+
+    blocker->release.release();
+    QSignalSpy finished(response.get(), &QQuickImageResponse::finished);
+    QVERIFY(finished.wait(5000));
+    QCOMPARE(response->errorString(), QString());
+    QCOMPARE(provider.queuedPriority(path), -1);
+}
+
+void TestThumbnails::cancelledDecodeStillWritesTheDiskCache()
+{
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("cancel-persist.png"), 64, 64);
+    const auto version = ThumbnailCache::Version::of(path);
+    const QString cachePath = PhotoThumbnailCache::cachePathFor(path, 256, version);
+    QFile::remove(cachePath);
+    PhotoThumbnailCache::clearMemory();
+
+    struct Pause {
+        std::atomic<bool> pause{false};
+        std::atomic<bool> reached{false};
+        Pause()
+        {
+            OmantaThumbnailTest::g_pauseBeforePhotoStore = &pause;
+            OmantaThumbnailTest::g_reachedBeforePhotoStore = &reached;
+        }
+        ~Pause()
+        {
+            pause.store(true, std::memory_order_release);
+            OmantaThumbnailTest::g_pauseBeforePhotoStore = nullptr;
+            OmantaThumbnailTest::g_reachedBeforePhotoStore = nullptr;
+        }
+    } pause;
+
+    const QFileInfo info(path);
+    Thumbnails thumbnails;
+    PhotoThumbnailProvider provider;
+    const QString source = thumbnails.photoSource(path, info.lastModified(), info.size(), 256, 50);
+    const QString id = QUrl(source).toString(QUrl::RemoveScheme | QUrl::RemoveAuthority).mid(1);
+    QQuickImageResponse *response = provider.requestImageResponse(id, QSize(256, 256));
+    QTRY_VERIFY(pause.reached.load(std::memory_order_acquire));
+    response->cancel();
+    delete response;
+    pause.pause.store(true, std::memory_order_release);
+
+    QVERIFY(provider.threadPool()->waitForDone(5000));
+    QVERIFY2(QFile::exists(cachePath), qPrintable(cachePath));
+}
+
+void TestThumbnails::photoIoBoundTracksLiveViews()
+{
+    PhotoThumbnailProvider provider;
+    Thumbnails thumbnails;
+    auto slow = std::make_unique<QObject>();
+    auto fast = std::make_unique<QObject>();
+    const int fastThreads = qMax(2, qMin(4, QThread::idealThreadCount()));
+
+    QVERIFY(!provider.ioBound());
+    thumbnails.bindPhotoIo(slow.get(), true);
+    QVERIFY(provider.ioBound());
+    QCOMPARE(provider.threadPool()->maxThreadCount(), 2);
+
+    // A fast album does not lift the limit while a spinning disk is still open.
+    thumbnails.bindPhotoIo(fast.get(), false);
+    QVERIFY(provider.ioBound());
+
+    slow.reset();
+    QVERIFY(!provider.ioBound());
+    QCOMPARE(provider.threadPool()->maxThreadCount(), fastThreads);
+
+    thumbnails.bindPhotoIo(fast.get(), true);
+    QVERIFY(provider.ioBound());
+    fast.reset();
+    QVERIFY(!provider.ioBound());
+    QCOMPARE(provider.threadPool()->maxThreadCount(), fastThreads);
 }
 
 QTEST_MAIN(TestThumbnails)

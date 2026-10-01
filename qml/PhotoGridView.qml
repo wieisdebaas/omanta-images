@@ -13,11 +13,15 @@ Item {
     readonly property int cellWidth: tileSize + 24
     readonly property int cellHeight: tileSize + 48
     readonly property int columns: Math.max(1, Math.floor(view.width / cellWidth))
+    readonly property bool slowStorage: Thumbnails.isSlowStorage(root.tab.path)
 
     property string activePath: ""
     property string activeName: ""
 
     function positionAt(row) { view.positionViewAtIndex(row, GridView.Contain); }
+
+    Component.onCompleted: Thumbnails.bindPhotoIo(root, root.slowStorage)
+    onSlowStorageChanged: Thumbnails.bindPhotoIo(root, root.slowStorage)
 
     GridView {
         id: view
@@ -32,12 +36,16 @@ Item {
         keyNavigationEnabled: false
         boundsBehavior: Flickable.StopAtBounds
 
-        // Prefetch ~1–3 viewport heights so scrolling stays smooth while
-        // discovery continues on SMB.
-        readonly property real prefetchDistance:
-            height * (Math.abs(verticalVelocity) > 2200 ? 3 : 1.5)
-        displayMarginBeginning: verticalVelocity < -100 ? prefetchDistance : height * 1.0
-        displayMarginEnd: verticalVelocity > 100 ? prefetchDistance : height * 1.0
+        // Prefetch less on SMB/removable disks — random seeks thrash a HDD.
+        readonly property real prefetchDistance: {
+            if (root.slowStorage)
+                return height * (Math.abs(verticalVelocity) > 2200 ? 1.0 : 0.5)
+            return height * (Math.abs(verticalVelocity) > 2200 ? 3 : 1.5)
+        }
+        displayMarginBeginning: verticalVelocity < -100 ? prefetchDistance
+                                 : height * (root.slowStorage ? 0.35 : 1.0)
+        displayMarginEnd: verticalVelocity > 100 ? prefetchDistance
+                            : height * (root.slowStorage ? 0.35 : 1.0)
 
         ScrollBar.vertical: ScrollBar {}
 
@@ -63,7 +71,7 @@ Item {
             readonly property bool nearViewport:
                 y + height >= view.contentY - view.height
                 && y <= view.contentY + view.height * 2
-            // Thread-pool priority: visible high, prefetch medium, else low.
+            // Thread-pool priority only (not part of Image.source).
             readonly property int requestPriority:
                 inViewport ? 100 : nearViewport ? 50 : 10
             readonly property string thumbnailSource:
@@ -98,7 +106,9 @@ Item {
                         sourceSize: Qt.size(root.tileSize, root.tileSize)
                         fillMode: Image.PreserveAspectFit
                         asynchronous: true
-                        cache: false
+                        // Versioned URLs already invalidate on edit; caching
+                        // makes scroll-back instant without re-hitting the provider.
+                        cache: true
                     }
                 }
 
