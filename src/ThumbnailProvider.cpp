@@ -10,6 +10,8 @@
 #include <QImageReader>
 #include <QImageWriter>
 #include <QProcess>
+#include <QCoreApplication>
+#include <QPointer>
 #include <QQuickImageResponse>
 #include <QRunnable>
 #include <QSaveFile>
@@ -23,6 +25,7 @@
 
 #include <atomic>
 #include <limits>
+#include <memory>
 
 namespace {
 
@@ -422,41 +425,110 @@ QImage ThumbnailCache::renderViaThumbnailer(const QString &filePath, const QStri
 
 namespace {
 
-class ThumbnailResponse : public QQuickImageResponse, public QRunnable
+// The response is owned by Qt Quick and can be cancel()'d / deleted while a
+// pool thread is still decoding. Keep the QRunnable separate and only deliver
+// through a QPointer on the GUI thread, so a cancelled response is never
+// touched after destruction (the cleanOrphanedConnectionsImpl SIGSEGV).
+class ThumbnailResponse : public QQuickImageResponse
 {
 public:
-    ThumbnailResponse(const QString &filePath, const ThumbnailCache::Version &expected, int size)
-        : m_filePath(filePath)
+    ThumbnailResponse(QString filePath, ThumbnailCache::Version expected, int size)
+        : m_filePath(std::move(filePath))
         , m_expected(expected)
         , m_bucket(ThumbnailCache::bucketFor(size))
+        , m_cancelled(std::make_shared<std::atomic_bool>(false))
     {
-        setAutoDelete(false);
     }
+
+    ~ThumbnailResponse() override { m_cancelled->store(true, std::memory_order_release); }
 
     QQuickTextureFactory *textureFactory() const override
     {
         return QQuickTextureFactory::textureFactoryForImage(m_image);
     }
 
+    void cancel() override { m_cancelled->store(true, std::memory_order_release); }
+
+    QString errorString() const override { return m_error; }
+
+    void deliver(QImage image, const QString &error)
+    {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        m_image = std::move(image);
+        m_error = error;
+        Q_EMIT finished();
+    }
+
+    const QString &filePath() const { return m_filePath; }
+    const ThumbnailCache::Version &expected() const { return m_expected; }
+    int bucket() const { return m_bucket; }
+    std::shared_ptr<std::atomic_bool> cancelFlag() const { return m_cancelled; }
+
+private:
+    QString m_filePath;
+    ThumbnailCache::Version m_expected;
+    int m_bucket;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
+    QImage m_image;
+    QString m_error;
+};
+
+void deliverThumbnail(const QPointer<ThumbnailResponse> &response, QImage image,
+                      const QString &error)
+{
+    // Post via qApp so a deleteLater'd response never receives the event.
+    QMetaObject::invokeMethod(qApp, [response, image = std::move(image), error]() mutable {
+        if (!response)
+            return;
+        response->deliver(std::move(image), error);
+    }, Qt::QueuedConnection);
+}
+
+class ThumbnailJob : public QRunnable
+{
+public:
+    explicit ThumbnailJob(ThumbnailResponse *response)
+        : m_response(response)
+        , m_cancelled(response->cancelFlag())
+        , m_filePath(response->filePath())
+        , m_expected(response->expected())
+        , m_bucket(response->bucket())
+    {
+    }
+
     void run() override
     {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+
         const QFileInfo info(m_filePath);
         if (!info.exists() || !info.isFile()) {
-            fail(QStringLiteral("no such file"));
+            deliverThumbnail(m_response, {}, QStringLiteral("no such file"));
             return;
         }
 
-        if (superseded(ThumbnailCache::Version::of(m_filePath)))
+        // Qt caches the answer under the URL, and the URL names one version of
+        // the file. Answering it with a picture of any other version would
+        // cache that picture as this version's, to be served back if the file
+        // is ever at this version again. The view asks afresh once its model
+        // catches up with the file.
+        const auto actual = ThumbnailCache::Version::of(m_filePath);
+        if (m_expected.modifiedMSecs > 0 && !(actual == m_expected)) {
+            deliverThumbnail(m_response, {}, QStringLiteral("file changed"));
+            return;
+        }
+
+        if (m_cancelled->load(std::memory_order_acquire))
             return;
 
         if (QImage cached = ThumbnailCache::loadValid(m_filePath, m_bucket); !cached.isNull()) {
-            m_image = cached;
-            Q_EMIT finished();
+            deliverThumbnail(m_response, std::move(cached), {});
             return;
         }
 
         if (ThumbnailCache::hasFailed(m_filePath)) {
-            fail(QStringLiteral("previously failed"));
+            deliverThumbnail(m_response, {}, QStringLiteral("previously failed"));
             return;
         }
 
@@ -467,6 +539,8 @@ public:
         QImage generated;
         ThumbnailCache::Version version;
         for (int attempt = 0; attempt < 3; ++attempt) {
+            if (m_cancelled->load(std::memory_order_acquire))
+                return;
             version = ThumbnailCache::Version::of(m_filePath);
             const QString mimeType = ThumbnailCache::contentTypeOf(m_filePath);
             generated = ThumbnailCache::render(m_filePath, mimeType, m_bucket);
@@ -479,47 +553,30 @@ public:
             }
         }
 
-        if (superseded(version))
+        if (m_cancelled->load(std::memory_order_acquire))
             return;
 
-        if (generated.isNull()) {
-            fail(QStringLiteral("could not render"));
+        if (m_expected.modifiedMSecs > 0 && !(version == m_expected)) {
+            deliverThumbnail(m_response, {}, QStringLiteral("file changed"));
             return;
         }
 
-        m_image = generated;
-        Q_EMIT finished();
-    }
+        if (generated.isNull()) {
+            // The view falls back to the file-type icon when a response errors, so
+            // failing is a normal outcome here, not an exceptional one.
+            deliverThumbnail(m_response, {}, QStringLiteral("could not render"));
+            return;
+        }
 
-    QString errorString() const override { return m_error; }
+        deliverThumbnail(m_response, std::move(generated), {});
+    }
 
 private:
-    // Qt caches the answer under the URL, and the URL names one version of
-    // the file. Answering it with a picture of any other version would
-    // cache that picture as this version's, to be served back if the file
-    // is ever at this version again. The view asks afresh once its model
-    // catches up with the file.
-    bool superseded(const ThumbnailCache::Version &actual)
-    {
-        if (m_expected.modifiedMSecs <= 0 || actual == m_expected)
-            return false;
-        fail(QStringLiteral("file changed"));
-        return true;
-    }
-
-    void fail(const QString &reason)
-    {
-        // The view falls back to the file-type icon when a response errors, so
-        // failing is a normal outcome here, not an exceptional one.
-        m_error = reason;
-        Q_EMIT finished();
-    }
-
+    QPointer<ThumbnailResponse> m_response;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
     QString m_filePath;
     ThumbnailCache::Version m_expected;
     int m_bucket;
-    QImage m_image;
-    QString m_error;
 };
 
 } // namespace
@@ -531,7 +588,7 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
     ThumbnailCache::Version expected;
     const QString path = Thumbnails::pathFromId(id, &expected);
     auto *response = new ThumbnailResponse(path, expected, size);
-    QThreadPool::globalInstance()->start(response);
+    QThreadPool::globalInstance()->start(new ThumbnailJob(response));
     return response;
 }
 
@@ -649,64 +706,109 @@ void PhotoThumbnailCache::clearAll()
 
 namespace {
 
-class PhotoThumbnailResponse : public QQuickImageResponse, public QRunnable
+class PhotoThumbnailResponse : public QQuickImageResponse
 {
 public:
     PhotoThumbnailResponse(QString filePath, ThumbnailCache::Version version, int size)
         : m_filePath(std::move(filePath))
         , m_version(version)
         , m_bucket(PhotoThumbnailCache::bucketFor(size))
+        , m_cancelled(std::make_shared<std::atomic_bool>(false))
     {
-        setAutoDelete(false);
     }
+
+    ~PhotoThumbnailResponse() override { m_cancelled->store(true, std::memory_order_release); }
 
     QQuickTextureFactory *textureFactory() const override
     {
         return QQuickTextureFactory::textureFactoryForImage(m_image);
     }
 
-    void cancel() override { m_cancelled.store(true, std::memory_order_relaxed); }
-
-    void run() override
-    {
-        if (m_cancelled.load(std::memory_order_relaxed))
-            return finish(QStringLiteral("cancelled"));
-
-        m_image = PhotoThumbnailCache::load(m_filePath, m_bucket, m_version);
-        if (!m_image.isNull())
-            return finish({});
-
-        if (m_cancelled.load(std::memory_order_relaxed))
-            return finish(QStringLiteral("cancelled"));
-
-        QImage image = ThumbnailCache::renderImageFile(m_filePath, m_bucket);
-        if (m_cancelled.load(std::memory_order_relaxed))
-            return finish(QStringLiteral("cancelled"));
-        if (image.isNull())
-            return finish(QStringLiteral("could not render"));
-        if (!(ThumbnailCache::Version::of(m_filePath) == m_version))
-            return finish(QStringLiteral("file changed"));
-
-        PhotoThumbnailCache::store(m_filePath, m_bucket, m_version, image);
-        m_image = std::move(image);
-        finish({});
-    }
+    void cancel() override { m_cancelled->store(true, std::memory_order_release); }
 
     QString errorString() const override { return m_error; }
 
-private:
-    void finish(const QString &error)
+    void deliver(QImage image, const QString &error)
     {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        m_image = std::move(image);
         m_error = error;
         Q_EMIT finished();
     }
 
+    const QString &filePath() const { return m_filePath; }
+    const ThumbnailCache::Version &version() const { return m_version; }
+    int bucket() const { return m_bucket; }
+    std::shared_ptr<std::atomic_bool> cancelFlag() const { return m_cancelled; }
+
+private:
     QString m_filePath;
     ThumbnailCache::Version m_version;
     int m_bucket;
-    std::atomic_bool m_cancelled = false;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
     QImage m_image;
     QString m_error;
+};
+
+void deliverPhotoThumbnail(const QPointer<PhotoThumbnailResponse> &response, QImage image,
+                           const QString &error)
+{
+    QMetaObject::invokeMethod(qApp, [response, image = std::move(image), error]() mutable {
+        if (!response)
+            return;
+        response->deliver(std::move(image), error);
+    }, Qt::QueuedConnection);
+}
+
+class PhotoThumbnailJob : public QRunnable
+{
+public:
+    explicit PhotoThumbnailJob(PhotoThumbnailResponse *response)
+        : m_response(response)
+        , m_cancelled(response->cancelFlag())
+        , m_filePath(response->filePath())
+        , m_version(response->version())
+        , m_bucket(response->bucket())
+    {
+    }
+
+    void run() override
+    {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+
+        QImage cached = PhotoThumbnailCache::load(m_filePath, m_bucket, m_version);
+        if (!cached.isNull()) {
+            deliverPhotoThumbnail(m_response, std::move(cached), {});
+            return;
+        }
+
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+
+        QImage image = ThumbnailCache::renderImageFile(m_filePath, m_bucket);
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        if (image.isNull()) {
+            deliverPhotoThumbnail(m_response, {}, QStringLiteral("could not render"));
+            return;
+        }
+        if (!(ThumbnailCache::Version::of(m_filePath) == m_version)) {
+            deliverPhotoThumbnail(m_response, {}, QStringLiteral("file changed"));
+            return;
+        }
+
+        PhotoThumbnailCache::store(m_filePath, m_bucket, m_version, image);
+        deliverPhotoThumbnail(m_response, std::move(image), {});
+    }
+
+private:
+    QPointer<PhotoThumbnailResponse> m_response;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
+    QString m_filePath;
+    ThumbnailCache::Version m_version;
+    int m_bucket;
 };
 
 } // namespace
@@ -741,7 +843,7 @@ QQuickImageResponse *PhotoThumbnailProvider::requestImageResponse(const QString 
     const QString path = QUrl::fromPercentEncoding(parts.mid(3).join(QLatin1Char('/')).toUtf8());
     const int size = requestedSize.width() > 0 ? requestedSize.width() : encodedSize;
     auto *response = new PhotoThumbnailResponse(path, expected, size);
-    m_pool.start(response, priority);
+    m_pool.start(new PhotoThumbnailJob(response), priority);
     return response;
 }
 

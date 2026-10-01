@@ -9,6 +9,7 @@
 #include <QQuickImageResponse>
 #include <QSignalSpy>
 #include <QTest>
+#include <QThreadPool>
 #include <QUrl>
 
 #include <memory>
@@ -45,6 +46,8 @@ private Q_SLOTS:
     void photoCacheInvalidatesWhenSourceChanges();
     void photoMemoryCacheIsBoundedAndClearable();
     void photoProviderReleasesMemoryOnDestruction();
+    void providerSurvivesResponseDestructionWhileRunning();
+    void photoProviderSurvivesResponseDestructionWhileRunning();
 
 private:
     static QString writeImage(const TempTree &tree, const QString &name, int w, int h)
@@ -378,6 +381,52 @@ void TestThumbnails::photoProviderReleasesMemoryOnDestruction()
     }
 
     QCOMPARE(PhotoThumbnailCache::memoryCount(), 0);
+}
+
+void TestThumbnails::providerSurvivesResponseDestructionWhileRunning()
+{
+    // Qt cancels and deletes a QQuickImageResponse when a cell scrolls away.
+    // The worker must not touch that object afterwards — the SIGSEGV in
+    // QObjectPrivate::cleanOrphanedConnectionsImpl was exactly that race.
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("race.png"), 2500, 2500);
+    const QFileInfo info(path);
+    Thumbnails thumbnails;
+    ThumbnailProvider provider;
+    const QString id =
+        QUrl(thumbnails.source(path, info.lastModified(), info.size()))
+            .toString(QUrl::RemoveScheme | QUrl::RemoveAuthority)
+            .mid(1);
+
+    for (int i = 0; i < 80; ++i) {
+        QQuickImageResponse *response = provider.requestImageResponse(id, QSize(256, 256));
+        response->cancel();
+        delete response;
+    }
+
+    QVERIFY(QThreadPool::globalInstance()->waitForDone(60000));
+}
+
+void TestThumbnails::photoProviderSurvivesResponseDestructionWhileRunning()
+{
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("photo-race.png"), 2500, 2500);
+    const QFileInfo info(path);
+    Thumbnails thumbnails;
+    const QString id =
+        QUrl(thumbnails.photoSource(path, info.lastModified(), info.size(), 256, 50))
+            .toString(QUrl::RemoveScheme | QUrl::RemoveAuthority)
+            .mid(1);
+
+    {
+        PhotoThumbnailProvider provider;
+        for (int i = 0; i < 80; ++i) {
+            QQuickImageResponse *response =
+                provider.requestImageResponse(id, QSize(256, 256));
+            response->cancel();
+            delete response;
+        }
+    }
 }
 
 QTEST_MAIN(TestThumbnails)
