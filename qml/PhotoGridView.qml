@@ -17,6 +17,8 @@ Item {
 
     property string activePath: ""
     property string activeName: ""
+    property var activeModified
+    property real activeSize: 0
 
     function positionAt(row) { view.positionViewAtIndex(row, GridView.Contain); }
 
@@ -136,6 +138,8 @@ Item {
                     }
                     root.activePath = cell.previewPath
                     root.activeName = cell.displayName
+                    root.activeModified = cell.modified
+                    root.activeSize = cell.size
                     preview.open()
                 }
                 onDoubleClicked: root.tab.activate(cell.index)
@@ -156,6 +160,8 @@ Item {
         onClosed: {
             root.activePath = ""
             root.activeName = ""
+            root.activeModified = undefined
+            root.activeSize = 0
         }
 
         background: Rectangle {
@@ -169,7 +175,14 @@ Item {
                 anchors.fill: parent
                 anchors.margins: 24
                 anchors.bottomMargin: 48
-                source: preview.opened ? Thumbnails.originalSource(root.activePath) : ""
+                // A NAS photo is an smb:// URI. Qt cannot open that as a file
+                // URL, so the popup asks the photo provider, which reads it
+                // through GIO. Local files still show the original.
+                source: !preview.opened || root.activePath === "" ? ""
+                      : Platform.isLocal(root.activePath)
+                        ? Thumbnails.originalSource(root.activePath)
+                        : Thumbnails.photoSource(root.activePath, root.activeModified,
+                                                 root.activeSize, 1024, 100)
                 fillMode: Image.PreserveAspectFit
                 asynchronous: true
                 cache: false

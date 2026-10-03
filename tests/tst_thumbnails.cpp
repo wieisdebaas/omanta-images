@@ -1,3 +1,4 @@
+#include "Location.h"
 #include "TestFixture.h"
 #include "ThumbnailProvider.h"
 
@@ -42,6 +43,7 @@ private Q_SLOTS:
     void rendersASmallImage();
     void rendersAHighResolutionImage();
     void honoursExifOrientation();
+    void decodesAFileUriTheWayANasShareIsOpened();
 
     void storesAndReusesACachedThumbnail();
     void invalidatesTheCacheWhenTheFileChanges();
@@ -174,6 +176,28 @@ void TestThumbnails::honoursExifOrientation()
     const QImage thumb = ThumbnailCache::renderImageFile(path, 128);
     QVERIFY(!thumb.isNull());
     QVERIFY2(thumb.width() > thumb.height(), "a landscape image must stay landscape");
+}
+
+void TestThumbnails::decodesAFileUriTheWayANasShareIsOpened()
+{
+    // smb:// is not a path QImageReader or QFileInfo can open. file:// takes
+    // the same GIO branch without needing a server: the bytes and the version
+    // have to come back, or the photo grid discards the decode.
+    TempTree tree;
+    const QString path = writeImage(tree, QStringLiteral("nas.png"), 320, 200);
+    const QString uri = QUrl::fromLocalFile(path).toString();
+    QVERIFY(Location::isUri(uri));
+    QVERIFY(!QFileInfo::exists(uri));
+
+    const QImage thumb = ThumbnailCache::renderImageFile(uri, 128);
+    QVERIFY(!thumb.isNull());
+    QVERIFY(thumb.width() <= 128 && thumb.height() <= 128);
+    QVERIFY2(thumb.width() > thumb.height(), qPrintable(uri));
+
+    const auto viaUri = ThumbnailCache::Version::of(uri);
+    const auto viaPath = ThumbnailCache::Version::of(path);
+    QCOMPARE(viaUri.size, viaPath.size);
+    QCOMPARE(viaUri.modifiedMSecs, viaPath.modifiedMSecs);
 }
 
 void TestThumbnails::storesAndReusesACachedThumbnail()
