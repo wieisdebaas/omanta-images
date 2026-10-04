@@ -77,17 +77,18 @@ void TestPlaces::placesSectionHasTheFixedEntries()
     PlacesModel model;
     const QStringList names = namesInSection(model, QStringLiteral("Places"));
 
-    // Nautilus's exact rows in Nautilus's exact order — verified against
-    // Files 50.2.2 on the target machine. Nothing added (no XDG dirs — those
-    // arrive as bookmarks), nothing dropped, nothing reordered.
+    // Nautilus's rows, in Nautilus's order, plus People. People is Omanta's
+    // face library (not a Files row): everyone already named, across the
+    // folders that have been indexed.
     QCOMPARE(names, QStringList({ QStringLiteral("Home"), QStringLiteral("Recent"),
-                                  QStringLiteral("Starred"), QStringLiteral("Network"),
-                                  QStringLiteral("Trash") }));
+                                  QStringLiteral("Starred"), QStringLiteral("People"),
+                                  QStringLiteral("Network"), QStringLiteral("Trash") }));
 
     QVERIFY(model.rowForLocation(QDir::homePath()) >= 0);
     QVERIFY(model.rowForLocation(QStringLiteral("trash:///")) >= 0);
     QVERIFY(model.rowForLocation(QStringLiteral("recent:///")) >= 0);
     QVERIFY(model.rowForLocation(QStringLiteral("starred:///")) >= 0);
+    QVERIFY(model.rowForLocation(QStringLiteral("people:///")) >= 0);
     QVERIFY(model.rowForLocation(QStringLiteral("network:///")) >= 0);
 }
 

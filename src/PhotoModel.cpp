@@ -191,7 +191,8 @@ void PhotoModel::restart()
         return;
 
     // Special places are not GIO directories — leave the model empty.
-    if (m_path == QLatin1String("starred:///") || m_path == QLatin1String("network:///"))
+    if (m_path == QLatin1String("starred:///") || m_path == QLatin1String("network:///")
+        || m_path == QLatin1String("people:///"))
         return;
 
     setScanning(true);

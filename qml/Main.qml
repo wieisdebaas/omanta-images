@@ -545,6 +545,15 @@ Window {
                 }
 
                 ToolbarButton {
+                    visible: root.viewMode === "photo"
+                    glyph: "view-faces"
+                    active: Settings.showFaces && enabled
+                    enabled: root.currentTab && Platform.isLocal(root.currentTab.path)
+                    tip: enabled ? qsTr("Show faces") : qsTr("Faces work in local folders")
+                    onTriggered: Settings.showFaces = !Settings.showFaces
+                }
+
+                ToolbarButton {
                     id: viewOptionsButton
                     symbol: "▼"
                     symbolSize: 12
@@ -1032,7 +1041,7 @@ Window {
             return false;
         const path = currentTab.path;
         return path !== "trash:///" && path !== "recent:///"
-            && path !== "network:///" && path !== "starred:///";
+            && path !== "network:///" && path !== "starred:///" && path !== "people:///";
     }
 
     function toggleBookmark() {
@@ -1057,7 +1066,7 @@ Window {
             return false;
         const path = currentTab.path;
         return path !== "trash:///" && path !== "recent:///"
-            && path !== "network:///" && path !== "starred:///";
+            && path !== "network:///" && path !== "starred:///" && path !== "people:///";
     }
 
     // The Network view carries its own chrome: the server bar below the view
@@ -1885,6 +1894,7 @@ Window {
             enabled: root.currentTab && root.currentTab.selectionCount > 0
                      && (Platform.isLocal(root.currentTab.path)
                          || root.currentTab.path === "starred:///"
+                         || root.currentTab.path === "people:///"
                          || root.viewingRecent)
             onTriggered: {
                 if (contextMenu.selectionStarred)

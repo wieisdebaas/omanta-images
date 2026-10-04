@@ -9,6 +9,7 @@
 #include "IconImageProvider.h"
 #include "Platform.h"
 #include "SystemTheme.h"
+#include "FacePreviewProvider.h"
 #include "ThumbnailProvider.h"
 
 #include <QCommandLineOption>
@@ -131,6 +132,7 @@ int main(int argc, char *argv[])
     engine.addImageProvider(QStringLiteral("fileicon"), new IconImageProvider);
     engine.addImageProvider(QStringLiteral("thumbnail"), new ThumbnailProvider);
     engine.addImageProvider(QStringLiteral("photo"), new PhotoThumbnailProvider);
+    engine.addImageProvider(QStringLiteral("facepreview"), new FacePreviewProvider);
 
 
     Application application(&engine);

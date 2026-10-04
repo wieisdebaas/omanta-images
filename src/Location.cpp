@@ -15,6 +15,8 @@ QString rootLabel(const QString &scheme)
         return QStringLiteral("Trash");
     if (scheme == QLatin1String("starred"))
         return QStringLiteral("Starred");
+    if (scheme == QLatin1String("people"))
+        return QStringLiteral("People");
     if (scheme == QLatin1String("recent"))
         return QStringLiteral("Recent");
     if (scheme == QLatin1String("network"))

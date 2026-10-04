@@ -66,6 +66,9 @@ void TestSettings::defaultsAreNautilus()
     QCOMPARE(settings.defaultViewMode(), QStringLiteral("icon"));
     QCOMPARE(settings.showHiddenFiles(), false);
     QCOMPARE(settings.showSidebar(), true);
+    // Omanta's own switch. Off until the user asks the photo view to look
+    // for faces — indexing a library is not a Nautilus default.
+    QCOMPARE(settings.showFaces(), false);
 }
 
 void TestSettings::settersPersistAcrossInstances()
@@ -77,6 +80,7 @@ void TestSettings::settersPersistAcrossInstances()
         settings.setDateTimeFormat(QStringLiteral("detailed"));
         settings.setShowHiddenFiles(true);
         settings.setShowSidebar(false);
+        settings.setShowFaces(true);
         settings.setDefaultViewMode(QStringLiteral("photo"));
     }
 
@@ -86,6 +90,7 @@ void TestSettings::settersPersistAcrossInstances()
     QCOMPARE(reread.dateTimeFormat(), QStringLiteral("detailed"));
     QCOMPARE(reread.showHiddenFiles(), true);
     QCOMPARE(reread.showSidebar(), false);
+    QCOMPARE(reread.showFaces(), true);
     QCOMPARE(reread.defaultViewMode(), QStringLiteral("photo"));
     // Untouched keys still answer their defaults.
     QCOMPARE(reread.showThumbnails(), QStringLiteral("local-only"));

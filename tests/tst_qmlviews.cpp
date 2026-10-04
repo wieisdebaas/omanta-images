@@ -108,6 +108,8 @@ void TestQmlViews::initTestCase()
     // ~/.cache/thumbnails shared with every other application.
     QVERIFY(m_cache.isValid());
     qputenv("XDG_CACHE_HOME", m_cache.path().toUtf8());
+    qputenv("OMANTA_FACES_DB", m_cache.filePath("faces.sqlite").toUtf8());
+    qputenv("OMANTA_FACES_CROP_DIR", m_cache.filePath("face-crops").toUtf8());
     // Every window offers the Omarchy Toggle-menu row on first launch; these
     // suites must never edit the real desktop's menu or bindings.
     qputenv("OMANTA_SWITCH", "/nonexistent/omanta-switch");
