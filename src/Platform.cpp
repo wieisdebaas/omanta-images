@@ -232,13 +232,14 @@ QString Platform::resolvePath(const QString &input, const QString &base) const
     if (path.startsWith(QLatin1String("~/")))
         path = QDir::homePath() + path.mid(1);
 
-    // Starred, Recent, Trash and Network are not folders to be relative to;
-    // a bare name typed there means one in home.
+    // Starred, Recent, Trash, Network and People are not folders to be
+    // relative to; a bare name typed there means one in home.
     QString from = base;
     if (Location::isUri(from)) {
         const QString scheme = QUrl(from).scheme();
         if (scheme == QLatin1String("starred") || scheme == QLatin1String("recent")
-            || scheme == QLatin1String("trash") || scheme == QLatin1String("network"))
+            || scheme == QLatin1String("trash") || scheme == QLatin1String("network")
+            || scheme == QLatin1String("people"))
             from = QDir::homePath();
     }
     if (!path.startsWith(QLatin1Char('/')) && !from.isEmpty())

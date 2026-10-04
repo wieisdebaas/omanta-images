@@ -49,6 +49,10 @@ class Settings : public QObject
     // The sidebar in a wide window: F9 flips it and it sticks (Nautilus's
     // start-with-sidebar). A narrow window hides it regardless.
     Q_PROPERTY(bool showSidebar READ showSidebar WRITE setShowSidebar NOTIFY changed)
+    // Photo view only. Off until the user turns the faces button on — looking
+    // through a folder for people is not a Nautilus default, and it writes a
+    // face index under the user's data directory.
+    Q_PROPERTY(bool showFaces READ showFaces WRITE setShowFaces NOTIFY changed)
 
     // List-view columns, Nautilus's two-key shape: the full order (every
     // column id, reorderable) and the visible subset. Name is always visible
@@ -87,6 +91,7 @@ public:
     QString defaultViewMode() const { return choiceFor("defaultViewMode", {"icon", "list", "photo"}); }
     bool showHiddenFiles() const { return boolFor("showHiddenFiles", false); }
     bool showSidebar() const { return boolFor("showSidebar", true); }
+    bool showFaces() const { return boolFor("showFaces", false); }
     QStringList listColumnOrder() const;
     QStringList listVisibleColumns() const;
     QStringList iconCaptions() const;
@@ -112,6 +117,7 @@ public:
     void setDefaultViewMode(const QString &value) { set("defaultViewMode", value); }
     void setShowHiddenFiles(bool value) { set("showHiddenFiles", value ? "true" : "false"); }
     void setShowSidebar(bool value) { set("showSidebar", value ? "true" : "false"); }
+    void setShowFaces(bool value) { set("showFaces", value ? "true" : "false"); }
     void setListColumnOrder(const QStringList &value) { set("listColumnOrder", value.join(QLatin1Char(','))); }
     void setListVisibleColumns(const QStringList &value) { set("listVisibleColumns", value.join(QLatin1Char(','))); }
     void setIconCaptions(const QStringList &value) { set("iconCaptions", value.join(QLatin1Char(','))); }

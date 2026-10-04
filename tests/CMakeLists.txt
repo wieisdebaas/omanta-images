@@ -1,6 +1,6 @@
 # QmlIntegration provides the QML_ELEMENT macros the model headers use, without
 # dragging in the QML engine — these stay headless model tests.
-find_package(Qt6 6.5 REQUIRED COMPONENTS Test QmlIntegration Quick DBus)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Test QmlIntegration Quick DBus Sql)
 
 # Each suite is its own executable so a crash in one cannot take the rest down,
 # and so ctest reports them separately.
@@ -134,6 +134,20 @@ omanta_test(tst_photo
     ${CMAKE_SOURCE_DIR}/src/FileEntry.cpp
     ${CMAKE_SOURCE_DIR}/src/Location.cpp
 )
+
+omanta_test(tst_faces
+    ${CMAKE_SOURCE_DIR}/src/FaceStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/FacePhotoFilter.cpp
+    ${CMAKE_SOURCE_DIR}/src/FacePhotosModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/FaceEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/FaceIndexer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Location.cpp
+)
+target_include_directories(tst_faces PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_compile_definitions(tst_faces PRIVATE
+    OMANTA_FACE_MODELS_DIR="${CMAKE_SOURCE_DIR}/data/faces"
+    OMANTA_FACE_FIXTURE="${CMAKE_SOURCE_DIR}/tests/fixtures/face.jpg")
+target_link_libraries(tst_faces PRIVATE Qt6::Sql opencv_core opencv_imgproc opencv_dnn opencv_objdetect)
 
 omanta_test(tst_fts
     ${CMAKE_SOURCE_DIR}/src/SearchModel.cpp

@@ -112,6 +112,7 @@ Rectangle {
             readonly property bool droppable: location !== ""
                                               && location !== "recent:///"
                                               && location !== "network:///"
+                                              && location !== "people:///"
 
             // ListView places its delegates at x 0 and ignores a delegate's
             // own x, so the 6px inset on each side lives on the view instead.

@@ -25,11 +25,11 @@ FocusScope {
     // real directory listing in the list view; everywhere else the flat
     // proxy serves as always.
     readonly property bool treeActive: viewMode === "list" && Settings.useTreeView
-        && searchQuery === "" && !viewingStarred && !viewingNetwork
+        && searchQuery === "" && !viewingStarred && !viewingNetwork && !viewingPeople
     // The model the views and every helper below speak to. The two carry the
     // same roles and the same invokable surface, so nothing downstream knows
     // which is live.
-    readonly property var files: viewMode === "photo" ? photoProxy
+    readonly property var files: viewMode === "photo" ? faceProxy
                                 : treeActive ? treeModel : proxy
     readonly property alias history: history
     readonly property string title: path === "/" ? "/" : Platform.baseName(path)
@@ -49,9 +49,16 @@ FocusScope {
             if (photoModel.errorMessage)
                 return photoModel.errorMessage;
             const photos = files.count === 1 ? "1 photo" : files.count + " photos";
-            if (photoModel.scanning)
-                return "Scanning… " + photos;
-            return photoModel.capped ? photos + " (limit reached)" : photos;
+            let line = photoModel.scanning ? "Scanning… " + photos
+                     : photoModel.capped ? photos + " (limit reached)" : photos;
+            // Faces is created only once the user has turned the button on.
+            if (Settings.showFaces || viewingPeople) {
+                if (Faces.selectedLabel !== "")
+                    line = Faces.selectedLabel + " · " + line;
+                if (Faces.status !== "")
+                    line = Faces.status + " · " + line;
+            }
+            return line;
         }
         if (dirModel.errorMessage)
             return dirModel.errorMessage;
@@ -134,6 +141,7 @@ FocusScope {
 
     readonly property bool viewingStarred: path === "starred:///"
     readonly property bool viewingNetwork: path === "network:///"
+    readonly property bool viewingPeople: path === "people:///"
     // Recent rows are pointers: recent:///<id> URIs that no file operation
     // can act on. Everything that leaves this tab — selection, activation,
     // drags — resolves them to the target file, as Nautilus does. Trash rows
@@ -146,14 +154,14 @@ FocusScope {
     // one folder's name list can't answer their conflicts. A tree selection
     // spans folders, which is the same problem.
     readonly property bool batchRenamable: searchQuery === "" && !viewingStarred
-        && !viewingNetwork && !treeActive
+        && !viewingNetwork && !viewingPeople && !treeActive
         && path !== "trash:///" && path !== "recent:///"
 
     DirectoryModel {
         id: dirModel
-        // starred:/// and network:/// are ours, not GIO's — the directory
-        // model must not be asked to enumerate them.
-        path: root.viewingStarred || root.viewingNetwork ? "" : root.path
+        // starred:///, network:/// and people:/// are ours, not GIO's — the
+        // directory model must not be asked to enumerate them.
+        path: root.viewingStarred || root.viewingNetwork || root.viewingPeople ? "" : root.path
         // Same three-way policy shape as thumbnails: a remote mount only
         // counts folders when the preference says all locations.
         countItems: Settings.showDirectoryItemCounts === "always"
@@ -206,9 +214,9 @@ FocusScope {
     // decoded asynchronously by the photo image provider.
     PhotoModel {
         id: photoModel
-        path: root.viewingStarred || root.viewingNetwork ? "" : root.path
+        path: root.viewingStarred || root.viewingNetwork || root.viewingPeople ? "" : root.path
         active: root.viewMode === "photo" && root.searchQuery === ""
-                && !root.viewingStarred && !root.viewingNetwork
+                && !root.viewingStarred && !root.viewingNetwork && !root.viewingPeople
         showHidden: root.showHidden
         onNeedsMount: location => root.mountNeeded(location)
     }
@@ -220,6 +228,23 @@ FocusScope {
         sortKey: root.sortKey
         sortDescending: root.sortDescending
         foldersFirst: false
+    }
+
+    FacePhotosModel {
+        id: peoplePhotos
+        paths: root.viewingPeople ? Faces.libraryPaths : []
+    }
+
+    // Always the photo view's model. Filtering is off until a face chip is
+    // selected, so an ordinary Ctrl+3 grid is this proxy with every row kept.
+    // The People place is already a list of the right photos, so it is not
+    // filtered again.
+    FacePhotoFilter {
+        id: faceProxy
+        sourceModel: root.viewingPeople ? peoplePhotos : photoProxy
+        filtering: root.viewingPeople ? false
+                 : (Settings.showFaces && Faces.selectedPersonIds.length > 0)
+        paths: filtering ? Faces.selectedPaths : []
     }
 
     DirectoryTreeModel {
@@ -249,6 +274,8 @@ FocusScope {
         clearSelection();
         currentIndex = -1;
         searchQuery = ""; // navigating away is leaving the search
+        if (path === "people:///")
+            viewMode = "photo"
         if (history.current !== path)
             history.visit(path);
     }
@@ -370,6 +397,9 @@ FocusScope {
     function reload() {
         dirModel.reload();
         photoModel.reload();
+        if (root.viewingPeople
+                || (root.viewMode === "photo" && Settings.showFaces && Platform.isLocal(root.path)))
+            Faces.rescan();
     }
 
     // Quick Look (Space): the one selected item, or the current row, in the

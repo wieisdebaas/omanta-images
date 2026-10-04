@@ -53,6 +53,8 @@ const Glyph kGlyphs[] = {
       R"(<path stroke="%C%" stroke-width="1.7" fill="none" d="M12 6.4 6.4 17.6 M12 6.4 17.6 17.6 M6.4 17.6 h11.2"/><path fill="%C%" d="M12 3.9 a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5 z M6.4 15.1 a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5 z M17.6 15.1 a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5 z"/>)" },
     { "grid",
       R"(<rect fill="%C%" x="4.6" y="4.6" width="6.5" height="6.5" rx="1.4"/><rect fill="%C%" x="12.9" y="4.6" width="6.5" height="6.5" rx="1.4"/><rect fill="%C%" x="4.6" y="12.9" width="6.5" height="6.5" rx="1.4"/><rect fill="%C%" x="12.9" y="12.9" width="6.5" height="6.5" rx="1.4"/>)" },
+    { "face",
+      R"(<path fill="none" stroke="%C%" stroke-width="1.7" d="M12 4.2 a7.8 7.8 0 1 1 0 15.6 a7.8 7.8 0 0 1 0-15.6 z"/><circle fill="%C%" cx="9.2" cy="10.5" r="1"/><circle fill="%C%" cx="14.8" cy="10.5" r="1"/><path fill="none" stroke="%C%" stroke-width="1.5" stroke-linecap="round" d="M9.1 14.2 c.9 1.3 1.8 1.9 2.9 1.9 s2-.6 2.9-1.9"/>)" },
     { "sidebar",
       R"(<path fill="%C%" fill-rule="evenodd" d="M4 6 a2 2 0 0 1 2-2 h12 a2 2 0 0 1 2 2 v12 a2 2 0 0 1 -2 2 H6 a2 2 0 0 1 -2-2 z M10.5 5.8 v12.4 H18 a.2 .2 0 0 0 .2-.2 V6 a.2 .2 0 0 0 -.2-.2 z"/>)" },
     { "bookmark",
@@ -138,6 +140,8 @@ QString glyphForName(QString name)
     // The app's own chrome (not a GIO name): the view-switch button.
     if (name == QLatin1String("view-grid")) return QStringLiteral("grid");
     if (name == QLatin1String("view-photo")) return QStringLiteral("image");
+    if (name == QLatin1String("view-faces") || name == QLatin1String("people"))
+        return QStringLiteral("face");
     if (name == QLatin1String("view-sidebar")) return QStringLiteral("sidebar");
 
     // The sidebar's specials and everything folder-ish.

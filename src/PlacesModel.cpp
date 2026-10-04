@@ -244,6 +244,10 @@ QList<PlacesModel::Place> PlacesModel::placesSection() const
           QStringLiteral("document-open-recent-symbolic,document-open-recent"), section },
         { QStringLiteral("Starred"), QStringLiteral("starred:///"),
           QStringLiteral("starred-symbolic,starred"), section },
+        // Omanta's face library. Not a Nautilus row: it lists people already
+        // named in local folders.
+        { QStringLiteral("People"), QStringLiteral("people:///"),
+          QStringLiteral("people"), section },
         { QStringLiteral("Network"), QStringLiteral("network:///"),
           QStringLiteral("network-workgroup-symbolic,network-workgroup"), section },
         { QStringLiteral("Trash"), QStringLiteral("trash:///"),

@@ -4,7 +4,8 @@ project(omanta VERSION 0.1.21 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 DBus Svg)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 DBus Svg Sql)
+find_package(OpenCV REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
@@ -38,6 +39,21 @@ set(OMANTA_SOURCES
     src/FileOperationWorker.h
     src/FileProperties.cpp
     src/FileProperties.h
+    src/FaceEngine.cpp
+    src/FaceEngine.h
+    src/FaceIndexer.cpp
+    src/FaceIndexer.h
+    src/FacePhotoFilter.cpp
+    src/FacePhotoFilter.h
+    src/FacePhotosModel.cpp
+    src/FacePhotosModel.h
+    src/FacePreviewProvider.cpp
+    src/FacePreviewProvider.h
+    src/FaceStore.cpp
+    src/FaceStore.h
+    src/FaceTypes.h
+    src/Faces.cpp
+    src/Faces.h
     src/FileSortFilterModel.cpp
     src/FileSortFilterModel.h
     src/IconImageProvider.cpp
@@ -54,6 +70,8 @@ set(OMANTA_SOURCES
     src/Platform.h
     src/PlacesModel.cpp
     src/PlacesModel.h
+    src/PeopleModel.cpp
+    src/PeopleModel.h
     src/PhotoModel.cpp
     src/PhotoModel.h
     src/SearchModel.cpp
@@ -90,6 +108,8 @@ set(OMANTA_QML_FILES
     qml/FileListView.qml
     qml/FileIconView.qml
     qml/PhotoGridView.qml
+    qml/PeopleBar.qml
+    qml/NameFacesDialog.qml
     qml/FileDrag.qml
     qml/ToolbarButton.qml
     qml/DialogCloseButton.qml
@@ -119,7 +139,8 @@ target_compile_definitions(omanta PRIVATE QT_NO_KEYWORDS)
 # Qt generates a type-registration file that includes each QML_ELEMENT header
 # by bare name (<DirectoryModel.h>), so src/ has to be on the include path or
 # the registrations silently compile to nothing.
-target_include_directories(omanta PRIVATE src)
+target_include_directories(omanta PRIVATE src ${OpenCV_INCLUDE_DIRS})
+target_compile_definitions(omanta PRIVATE OMANTA_FACE_MODELS_DIR="${CMAKE_SOURCE_DIR}/data/faces")
 
 set(OMANTA_LIBRARIES
     Qt6::Core
@@ -131,6 +152,11 @@ set(OMANTA_LIBRARIES
     PkgConfig::GIO
     PkgConfig::LIBARCHIVE
     PkgConfig::TINYSPARQL
+    Qt6::Sql
+    opencv_core
+    opencv_imgproc
+    opencv_dnn
+    opencv_objdetect
 )
 
 target_link_libraries(omanta PRIVATE ${OMANTA_LIBRARIES})
@@ -146,12 +172,14 @@ if(OMANTA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.t
         OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests/qml/Omanta
         QML_FILES ${OMANTA_QML_FILES})
     target_compile_definitions(tst_qmlviews PRIVATE QT_NO_KEYWORDS)
-    target_include_directories(tst_qmlviews PRIVATE src)
+    target_include_directories(tst_qmlviews PRIVATE src ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(tst_qmlviews PRIVATE OMANTA_FACE_MODELS_DIR="${CMAKE_SOURCE_DIR}/data/faces")
     target_link_libraries(tst_qmlviews PRIVATE ${OMANTA_LIBRARIES})
     add_subdirectory(tests)
 endif()
 
 install(TARGETS omanta RUNTIME DESTINATION bin)
+install(DIRECTORY data/faces/ DESTINATION share/omanta/faces FILES_MATCHING PATTERN "*.onnx")
 install(FILES LICENSE DESTINATION share/licenses/omanta)
 install(FILES packaging/omanta.desktop DESTINATION share/applications)
 install(FILES packaging/omanta.svg DESTINATION share/icons/hicolor/scalable/apps)

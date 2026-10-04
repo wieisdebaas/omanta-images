@@ -151,7 +151,8 @@ void TestNavigation::resolvesRelativePaths()
     QCOMPARE(platform.resolvePath(QStringLiteral("  src  "), QStringLiteral("/home/user")),
              QStringLiteral("/home/user/src"));
     // GitHub #10: typed in Starred and friends, a bare name means one in home.
-    for (const char *place : {"starred:///", "recent:///", "trash:///", "network:///"})
+    for (const char *place : {"starred:///", "recent:///", "trash:///", "network:///",
+                              "people:///"})
         QCOMPARE(platform.resolvePath(QStringLiteral("Documents"), QString::fromLatin1(place)),
                  QDir::homePath() + QStringLiteral("/Documents"));
 }

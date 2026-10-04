@@ -219,12 +219,83 @@ QImage ThumbnailCache::loadValid(const QString &filePath, int bucket)
     return image;
 }
 
+namespace {
+
+// QFileInfo only sees native paths. smb:// and the other GIO URIs need the
+// same mtime formula as FileEntry, or the photo grid treats a fresh decode
+// as "file changed" and throws it away.
+ThumbnailCache::Version versionViaGio(const QString &uri)
+{
+    GFile *file = Location::make(uri);
+    GError *error = nullptr;
+    GFileInfo *info = g_file_query_info(file,
+                                        G_FILE_ATTRIBUTE_TIME_MODIFIED ","
+                                        G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC ","
+                                        G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                        G_FILE_QUERY_INFO_NONE, nullptr, &error);
+    g_object_unref(file);
+    if (!info) {
+        g_clear_error(&error);
+        return {};
+    }
+
+    ThumbnailCache::Version version;
+    if (GDateTime *modified = g_file_info_get_modification_date_time(info)) {
+        version.modifiedMSecs = g_date_time_to_unix(modified) * 1000
+            + g_date_time_get_microsecond(modified) / 1000;
+        g_date_time_unref(modified);
+    }
+    version.size = qint64(g_file_info_get_size(info));
+    g_object_unref(info);
+    return version.modifiedMSecs < 0 ? ThumbnailCache::Version{} : version;
+}
+
+// Whole file: QImageReader wants a seekable device so setScaledSize can
+// still ask the JPEG decoder for a reduced frame. Capped so a mistaken
+// multi-gigabyte "image" cannot fill memory.
+QByteArray readUriBytes(const QString &uri)
+{
+    GFile *file = Location::make(uri);
+    GError *error = nullptr;
+    GFileInputStream *input = g_file_read(file, nullptr, &error);
+    g_object_unref(file);
+    if (!input) {
+        g_clear_error(&error);
+        return {};
+    }
+
+    QByteArray bytes;
+    char buffer[64 * 1024];
+    constexpr qint64 kMaxBytes = 512LL * 1024 * 1024;
+    while (bytes.size() < kMaxBytes) {
+        const gssize n = g_input_stream_read(G_INPUT_STREAM(input), buffer,
+                                              sizeof buffer, nullptr, &error);
+        if (n < 0) {
+            g_clear_error(&error);
+            bytes.clear();
+            break;
+        }
+        if (n == 0)
+            break;
+        bytes.append(buffer, int(n));
+    }
+    g_object_unref(input);
+    if (bytes.size() >= kMaxBytes)
+        return {};
+    return bytes;
+}
+
+} // namespace
+
 ThumbnailCache::Version ThumbnailCache::Version::of(const QString &filePath)
 {
     const QFileInfo info(filePath);
-    if (!info.exists())
-        return {};
-    return { info.lastModified().toMSecsSinceEpoch(), info.size() };
+    if (info.exists())
+        return { info.lastModified().toMSecsSinceEpoch(), info.size() };
+    // A URI QFileInfo cannot see (smb://, sftp://, file:// before clean()).
+    if (Location::isUri(filePath))
+        return versionViaGio(filePath);
+    return {};
 }
 
 void ThumbnailCache::store(const QString &filePath, int bucket, QImage image,
@@ -408,7 +479,23 @@ QImage ThumbnailCache::render(const QString &filePath, const QString &mimeType, 
 
 QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
 {
-    QImageReader reader(filePath);
+    // Native paths go straight to the decoder. GIO URIs (a NAS opened as
+    // smb://) are not files QImageReader can open, so the bytes come across
+    // first and the same scaled decode runs on the buffer.
+    QByteArray remoteBytes;
+    QBuffer remoteDevice;
+    QImageReader reader;
+    if (!QFileInfo::exists(filePath) && Location::isUri(filePath)) {
+        remoteBytes = readUriBytes(filePath);
+        if (remoteBytes.isEmpty())
+            return {};
+        remoteDevice.setBuffer(&remoteBytes);
+        if (!remoteDevice.open(QIODevice::ReadOnly))
+            return {};
+        reader.setDevice(&remoteDevice);
+    } else {
+        reader.setFileName(filePath);
+    }
     reader.setAutoTransform(true); // honour EXIF orientation
 
     // Qt caps decoded image allocations at 256MB by default, which rejects
@@ -560,7 +647,9 @@ public:
             return;
 
         const QFileInfo info(m_filePath);
-        if (!info.exists() || !info.isFile()) {
+        // smb:// is not a QFileInfo. The GIO read below is what can see it.
+        const bool remote = Location::isUri(m_filePath) && !info.exists();
+        if (!remote && (!info.exists() || !info.isFile())) {
             deliverThumbnail(m_response, {}, QStringLiteral("no such file"));
             return;
         }
