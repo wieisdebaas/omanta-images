@@ -44,6 +44,11 @@ private Q_SLOTS:
 
     void createsAFolder();
     void undoOfCreateRemovesIt();
+    void createsAFile();
+    void undoOfCreateFileRemovesIt();
+    void undoOfCreateFileLeavesWrittenContent();
+    void createFileRefusesAPathName();
+    void createFileRefusesToOverwrite();
 
     void renamesAFile();
     void undoOfRenameRestoresTheName();
@@ -125,6 +130,88 @@ void TestFileOperations::createsAFolder()
     QVERIFY(QFileInfo(tree.filePath("New Folder")).isDir());
     QVERIFY(ops.canUndo());
     QVERIFY(ops.lastError().isEmpty());
+}
+
+void TestFileOperations::createsAFile()
+{
+    TempTree tree;
+    FileOperations ops;
+
+    ops.createFile(tree.path(), QStringLiteral("notes.md"));
+    QVERIFY(settle(ops));
+
+    const QFileInfo created(tree.filePath("notes.md"));
+    QVERIFY(created.isFile());
+    QCOMPARE(created.size(), 0);
+    QVERIFY(ops.canUndo());
+    QVERIFY(ops.lastError().isEmpty());
+}
+
+void TestFileOperations::undoOfCreateFileRemovesIt()
+{
+    TempTree tree;
+    FileOperations ops;
+
+    ops.createFile(tree.path(), QStringLiteral("scratch.txt"));
+    QVERIFY(settle(ops));
+    QVERIFY(QFileInfo::exists(tree.filePath("scratch.txt")));
+
+    ops.undo();
+    QVERIFY(settle(ops));
+
+    QVERIFY(!QFileInfo::exists(tree.filePath("scratch.txt")));
+    QVERIFY(!ops.canUndo());
+}
+
+void TestFileOperations::undoOfCreateFileLeavesWrittenContent()
+{
+    TempTree tree;
+    FileOperations ops;
+
+    ops.createFile(tree.path(), QStringLiteral("notes.md"));
+    QVERIFY(settle(ops));
+
+    QFile file(tree.filePath("notes.md"));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write("hello"), 5);
+    file.close();
+
+    ops.undo();
+    QVERIFY(settle(ops));
+
+    QVERIFY(QFileInfo::exists(tree.filePath("notes.md")));
+    QCOMPARE(read(tree.filePath("notes.md")), QStringLiteral("hello"));
+    QVERIFY(ops.lastError().contains(QStringLiteral("no longer empty")));
+}
+
+void TestFileOperations::createFileRefusesAPathName()
+{
+    TempTree tree;
+    FileOperations ops;
+
+    ops.createFile(tree.path(), QStringLiteral("../escaped.txt"));
+    QVERIFY(!ops.lastError().isEmpty());
+    QVERIFY(!ops.busy());
+    QVERIFY(!QFileInfo::exists(QDir(tree.path()).filePath("../escaped.txt")));
+
+    ops.clearError();
+    ops.createFile(tree.path(), QStringLiteral(".."));
+    QVERIFY(!ops.lastError().isEmpty());
+    QVERIFY(!ops.canUndo());
+}
+
+void TestFileOperations::createFileRefusesToOverwrite()
+{
+    TempTree tree;
+    tree.writeFile("notes.md", 4);
+    FileOperations ops;
+
+    ops.createFile(tree.path(), QStringLiteral("notes.md"));
+    QVERIFY(settle(ops));
+
+    QVERIFY(!ops.lastError().isEmpty());
+    QCOMPARE(QFileInfo(tree.filePath("notes.md")).size(), 4);
+    QVERIFY(!ops.canUndo());
 }
 
 void TestFileOperations::undoOfCreateRemovesIt()

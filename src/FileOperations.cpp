@@ -14,7 +14,8 @@ QString FileOperationRequest::describe() const
     const QString what = count == 1 ? QFileInfo(sources.first()).fileName()
                                     : QStringLiteral("%1 items").arg(count);
     switch (kind) {
-    case CreateFolder: return QStringLiteral("Create “%1”").arg(sources.value(0));
+    case CreateFolder:
+    case CreateFile: return QStringLiteral("Create “%1”").arg(sources.value(0));
     case Rename: return QStringLiteral("Rename to “%1”").arg(destination);
     case BatchRename: return QStringLiteral("Rename %1").arg(what);
     case Compress: return QStringLiteral("Compress %1").arg(what);
@@ -40,7 +41,8 @@ QString FileOperationRequest::shortStatus() const
         ? QStringLiteral("“%1”").arg(QFileInfo(sources.first()).fileName())
         : QStringLiteral("%1 files").arg(count);
     switch (kind) {
-    case CreateFolder: return QStringLiteral("Creating “%1”").arg(sources.value(0));
+    case CreateFolder:
+    case CreateFile: return QStringLiteral("Creating “%1”").arg(sources.value(0));
     case Rename: return QStringLiteral("Renaming to “%1”").arg(destination);
     case BatchRename: return QStringLiteral("Renaming %1").arg(what);
     case Compress: return QStringLiteral("Compressing %1").arg(what);
@@ -377,11 +379,13 @@ void FileOperations::recordUndo(const FileOperationRequest &request,
 
     switch (request.kind) {
     case FileOperationRequest::CreateFolder:
+    case FileOperationRequest::CreateFile:
         if (result.produced.isEmpty())
             return;
         // Not trash: trash does not exist on every filesystem (tmpfs has none),
         // so an undo built on it fails exactly where the user least expects.
-        // RemoveCreatedFolder deletes the folder only while it is still empty.
+        // RemoveCreatedFolder deletes a folder only while it is still empty,
+        // and a file only while it is still zero bytes.
         entry.inverse.kind = FileOperationRequest::RemoveCreatedFolder;
         entry.inverse.sources = result.produced;
         break;
@@ -506,6 +510,23 @@ void FileOperations::createFolder(const QString &parentDir, const QString &name)
 {
     FileOperationRequest request;
     request.kind = FileOperationRequest::CreateFolder;
+    request.sources = { name };
+    request.destination = parentDir;
+    enqueue(request);
+}
+
+void FileOperations::createFile(const QString &parentDir, const QString &name)
+{
+    // A slash, "." or ".." is a path, not a file name — g_file_get_child would
+    // let it escape the folder the user is looking at.
+    if (name.isEmpty() || name.contains(QLatin1Char('/'))
+        || name == QLatin1String(".") || name == QLatin1String("..")) {
+        setError(QStringLiteral("A name cannot be empty or contain “/”"));
+        return;
+    }
+
+    FileOperationRequest request;
+    request.kind = FileOperationRequest::CreateFile;
     request.sources = { name };
     request.destination = parentDir;
     enqueue(request);

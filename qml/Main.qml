@@ -1016,6 +1016,13 @@ Window {
         newFolderPrompt.ask();
     }
 
+    function newFile() {
+        if (!viewWritable)
+            return;
+        newFilePrompt.initialText = "";
+        newFilePrompt.ask();
+    }
+
     function renameSelected() {
         // Recent rows are pointers at files elsewhere; renaming the pointer
         // is meaningless and renaming the target would strand it. Nautilus
@@ -1055,12 +1062,12 @@ Window {
 
     // Recent rows resolve to their target files for every operation (the tab
     // does that in selectedPaths/activate), but the view itself takes no new
-    // files and its rows keep their real names — so rename, paste and New
-    // Folder are off here, as in Nautilus.
+    // files and its rows keep their real names — so rename, paste, New
+    // Folder and New File are off here, as in Nautilus.
     readonly property bool viewingRecent: currentTab ? currentTab.viewingRecent : false
 
     // Whether the view is somewhere files can be created: any real directory,
-    // not one of the four virtual roots. Gates New Folder and Paste.
+    // not one of the four virtual roots. Gates New Folder, New File and Paste.
     readonly property bool viewWritable: {
         if (!currentTab || currentTab.path === "")
             return false;
@@ -1219,6 +1226,13 @@ Window {
         onClosed: root.returnFocusToView()
         prompt: qsTr("Name for the new folder")
         onAccepted_: name => FileOperations.createFolder(root.currentTab.path, name)
+    }
+
+    PromptDialog {
+        id: newFilePrompt
+        onClosed: root.returnFocusToView()
+        prompt: qsTr("Name for the new file, including the extension")
+        onAccepted_: name => FileOperations.createFile(root.currentTab.path, name)
     }
 
     PromptDialog {
@@ -1657,7 +1671,7 @@ Window {
                 && root.currentTab.batchRenamable && Platform.isLocal(root.currentTab.path);
             if (wantNewDocument !== newDocumentShown) {
                 if (wantNewDocument)
-                    pathBarMenu.insertMenu(1, pathBarNewDocumentMenu);
+                    pathBarMenu.insertMenu(2, pathBarNewDocumentMenu);
                 else
                     pathBarMenu.removeMenu(pathBarNewDocumentMenu);
                 newDocumentShown = wantNewDocument;
@@ -1668,6 +1682,12 @@ Window {
             text: qsTr("New Folder…")
             enabled: root.currentTab !== null && root.viewWritable
             onTriggered: root.newFolder()
+        }
+
+        MenuItem {
+            text: qsTr("New File…")
+            enabled: root.currentTab !== null && root.viewWritable
+            onTriggered: root.newFile()
         }
 
         MenuItem {
@@ -1784,7 +1804,7 @@ Window {
             // New Document exists only while ~/Templates has files and the
             // view is a real local directory — hidden otherwise, as
             // Nautilus. A submenu can't play the height:0 trick, so it is
-            // inserted after New Folder / removed on each open.
+            // inserted after New File / removed on each open.
             templateFiles = Platform.templates();
             const wantNewDocument = templateFiles.length > 0 && root.currentTab
                 && root.currentTab.batchRenamable && Platform.isLocal(root.currentTab.path);
@@ -1793,7 +1813,7 @@ Window {
                     let at = contextMenu.count;
                     for (let i = 0; i < contextMenu.count; ++i) {
                         const item = contextMenu.itemAt(i);
-                        if (item && item.text === qsTr("New Folder")) { at = i + 1; break; }
+                        if (item && item.text === qsTr("New File")) { at = i + 1; break; }
                     }
                     contextMenu.insertMenu(at, newDocumentMenu);
                 } else {
@@ -1941,6 +1961,12 @@ Window {
             text: qsTr("New Folder")
             enabled: root.viewWritable
             onTriggered: root.newFolder()
+        }
+
+        MenuItem {
+            text: qsTr("New File")
+            enabled: root.viewWritable
+            onTriggered: root.newFile()
         }
 
         MenuItem {

@@ -207,6 +207,9 @@ void FileOperationWorker::run(const FileOperationRequest &request, quint64 id)
     case FileOperationRequest::CreateFolder:
         ok = doCreateFolder(request, result, &error);
         break;
+    case FileOperationRequest::CreateFile:
+        ok = doCreateFile(request, result, &error);
+        break;
     case FileOperationRequest::Rename:
         ok = doRename(request, result, &error);
         break;
@@ -278,6 +281,34 @@ bool FileOperationWorker::doCreateFolder(const FileOperationRequest &request,
     else
         *error = messageOf(gerror, "Could not create folder");
 
+    g_clear_error(&gerror);
+    g_object_unref(target);
+    g_object_unref(parent);
+    return ok;
+}
+
+bool FileOperationWorker::doCreateFile(const FileOperationRequest &request,
+                                       FileOperationResult &result, QString *error)
+{
+    if (request.sources.isEmpty() || request.sources.first().isEmpty()) {
+        *error = QStringLiteral("No file name given");
+        return false;
+    }
+
+    GFile *parent = Location::make(request.destination);
+    GFile *target = g_file_get_child(parent, request.sources.first().toUtf8().constData());
+
+    GError *gerror = nullptr;
+    GFileOutputStream *stream = g_file_create(target, G_FILE_CREATE_NONE, m_cancellable, &gerror);
+    if (stream) {
+        g_output_stream_close(G_OUTPUT_STREAM(stream), m_cancellable, nullptr);
+        g_object_unref(stream);
+        result.produced << pathOf(target);
+    } else {
+        *error = messageOf(gerror, "Could not create file");
+    }
+
+    const bool ok = stream != nullptr;
     g_clear_error(&gerror);
     g_object_unref(target);
     g_object_unref(parent);
@@ -712,6 +743,15 @@ bool FileOperationWorker::doRemoveCreatedFolder(const FileOperationRequest &requ
     for (const QString &path : request.sources) {
         GFile *file = Location::make(path);
         GError *gerror = nullptr;
+
+        // A created file is only removed while it is still empty. g_file_delete
+        // would otherwise wipe whatever the user has written since.
+        if (!isDirectory(file) && sizeOf(file) != 0) {
+            *error = QStringLiteral("“%1” is no longer empty, so it was left alone")
+                         .arg(QFileInfo(path).fileName());
+            g_object_unref(file);
+            return false;
+        }
 
         // Non-recursive on purpose. If the user has put something in the folder
         // since it was created, undoing the creation must not take it with it.

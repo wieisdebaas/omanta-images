@@ -53,6 +53,7 @@ private:
 
     // Each returns false and sets `error` on failure.
     bool doCreateFolder(const FileOperationRequest &request, FileOperationResult &result, QString *error);
+    bool doCreateFile(const FileOperationRequest &request, FileOperationResult &result, QString *error);
     bool doCreateLink(const FileOperationRequest &request, FileOperationResult &result, QString *error);
     bool doRename(const FileOperationRequest &request, FileOperationResult &result, QString *error);
     bool doBatchRename(const FileOperationRequest &request, FileOperationResult &result,

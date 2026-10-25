@@ -438,7 +438,7 @@ Item {
                         return;
                     }
                     // Background right-click: the folder's own menu (Paste,
-                    // New Folder…), acting on no selection — as Nautilus.
+                    // New Folder, New File), acting on no selection — as Nautilus.
                     if (mouse.button === Qt.RightButton) {
                         root.tab.clearSelection();
                         root.tab.requestContextMenu();

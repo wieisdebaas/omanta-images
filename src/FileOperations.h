@@ -72,6 +72,8 @@ public:
     QString lastError() const { return m_lastError; }
 
     Q_INVOKABLE void createFolder(const QString &parentDir, const QString &name);
+    // An empty file. `name` is the full file name, extension included.
+    Q_INVOKABLE void createFile(const QString &parentDir, const QString &name);
     Q_INVOKABLE void rename(const QString &path, const QString &newName);
 
     // Renames paths[i] to newNames[i] as ONE undoable step. Order-safe (swaps

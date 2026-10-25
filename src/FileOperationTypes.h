@@ -46,6 +46,7 @@ struct FileOperationRequest
 {
     enum Kind {
         CreateFolder,     // destination = parent dir, sources[0] = new name
+        CreateFile,       // destination = parent dir, sources[0] = new name (with extension)
         Rename,           // sources[0] = path, destination = new name
         Trash,            // sources = paths
         RestoreFromTrash, // sources = ORIGINAL paths to restore back to
@@ -68,9 +69,10 @@ struct FileOperationRequest
         // batch leaves every name as it was.
         BatchRename,
 
-        // Undo of CreateFolder. Deletes the folder only while it is still
-        // empty, so undoing a mkdir can never destroy files the user has put
-        // there since. Trash would be safer still, but trash does not exist on
+        // Undo of CreateFolder and CreateFile. Deletes a folder only while it
+        // is still empty, and a file only while it is still zero bytes, so
+        // undoing a create can never destroy anything the user has put there
+        // since. Trash would be safer still, but trash does not exist on
         // every filesystem — see RemoveCreatedFolder in NOTES.md.
         RemoveCreatedFolder,
         UndoTransfer,
