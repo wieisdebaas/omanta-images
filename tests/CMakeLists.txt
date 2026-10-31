@@ -53,6 +53,7 @@ target_compile_definitions(tst_qmltext PRIVATE OMANTA_QML_DIR="${CMAKE_SOURCE_DI
 
 omanta_test(tst_thumbnails
     ${CMAKE_SOURCE_DIR}/src/ThumbnailProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/ImageOrientation.cpp
     ${CMAKE_SOURCE_DIR}/src/Location.cpp
 )
 
@@ -141,6 +142,7 @@ omanta_test(tst_faces
     ${CMAKE_SOURCE_DIR}/src/FacePhotosModel.cpp
     ${CMAKE_SOURCE_DIR}/src/FaceEngine.cpp
     ${CMAKE_SOURCE_DIR}/src/FaceIndexer.cpp
+    ${CMAKE_SOURCE_DIR}/src/ImageOrientation.cpp
     ${CMAKE_SOURCE_DIR}/src/Location.cpp
 )
 target_include_directories(tst_faces PRIVATE ${OpenCV_INCLUDE_DIRS})

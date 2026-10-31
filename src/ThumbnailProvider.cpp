@@ -1,5 +1,6 @@
 #include "ThumbnailProvider.h"
 
+#include "ImageOrientation.h"
 #include "Location.h"
 
 #include <QBuffer>
@@ -10,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QImageIOHandler>
 #include <QImageReader>
 #include <QImageWriter>
 #include <QMimeDatabase>
@@ -100,7 +102,9 @@ QString photoKey(const QString &filePath, int bucket, const ThumbnailCache::Vers
     // Paths from the directory/photo models are already absolute. canonicalFilePath()
     // is a realpath syscall — catastrophic on SMB/gvfs/external disks when paid
     // per thumbnail.
-    const QByteArray identity = filePath.toUtf8() + '\0'
+    // "exif2": WebP and PNG orientation used to be ignored, so a tile cached
+    // before that fix must not be served again for the same file bytes.
+    const QByteArray identity = QByteArrayLiteral("exif2\0") + filePath.toUtf8() + '\0'
         + QByteArray::number(version.size) + '\0'
         + QByteArray::number(version.modifiedMSecs) + '\0'
         + QByteArray::number(bucket);
@@ -496,7 +500,7 @@ QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
     } else {
         reader.setFileName(filePath);
     }
-    reader.setAutoTransform(true); // honour EXIF orientation
+    reader.setAutoTransform(true); // JPEG and TIFF honour EXIF orientation
 
     // Qt caps decoded image allocations at 256MB by default, which rejects
     // ordinary high-resolution scans before they can be scaled down. Generating
@@ -505,7 +509,9 @@ QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
     reader.setAllocationLimit(1024);
 
     const QSize original = reader.size();
-    if (original.isValid()) {
+    // size <= 0 keeps the original. The photo viewer asks for that; a grid
+    // cell asks for a thumbnail.
+    if (size > 0 && original.isValid()) {
         // Ask the decoder for a reduced size where it can oblige. On a 60MP
         // scan that is the difference between instant and a visible stall.
         QSize target = original;
@@ -517,9 +523,19 @@ QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
     if (image.isNull())
         return {};
 
-    if (image.width() > size || image.height() > size) {
+    if (size > 0 && (image.width() > size || image.height() > size)) {
         image = image.scaled(size, size, Qt::KeepAspectRatio,
                               ThumbnailCache::scaleModeFor(image.size(), size));
+    }
+
+    // WebP and PNG decode the sensor pixels and leave the orientation tag
+    // unread. JPEG/TIFF already rotated inside read(); applying the tag
+    // again would turn those back onto their side.
+    if (reader.transformation() == QImageIOHandler::TransformationNone) {
+        const QByteArray header = !remoteBytes.isEmpty()
+            ? remoteBytes.left(256 * 1024)
+            : ImageOrientation::headerFromFile(filePath);
+        image = ImageOrientation::apply(image, ImageOrientation::orientationOf(header));
     }
     return image;
 }
@@ -1235,9 +1251,95 @@ int Thumbnails::photoPriorityFor(const QString &filePath)
     return g_photoPriority.value(filePath, 50);
 }
 
+namespace {
+
+class OrientedImageResponse : public QQuickImageResponse
+{
+public:
+    explicit OrientedImageResponse(QString filePath)
+        : m_filePath(std::move(filePath))
+        , m_cancelled(std::make_shared<std::atomic_bool>(false))
+    {
+    }
+
+    ~OrientedImageResponse() override { m_cancelled->store(true, std::memory_order_release); }
+
+    QQuickTextureFactory *textureFactory() const override
+    {
+        return QQuickTextureFactory::textureFactoryForImage(m_image);
+    }
+
+    void cancel() override { m_cancelled->store(true, std::memory_order_release); }
+
+    QString errorString() const override { return m_error; }
+
+    void deliver(QImage image, const QString &error)
+    {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        m_image = std::move(image);
+        m_error = error;
+        Q_EMIT finished();
+    }
+
+    const QString &filePath() const { return m_filePath; }
+    std::shared_ptr<std::atomic_bool> cancelFlag() const { return m_cancelled; }
+
+private:
+    QString m_filePath;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
+    QImage m_image;
+    QString m_error;
+};
+
+class OrientedImageJob : public QRunnable
+{
+public:
+    explicit OrientedImageJob(OrientedImageResponse *response)
+        : m_response(response)
+        , m_cancelled(response->cancelFlag())
+        , m_filePath(response->filePath())
+    {
+    }
+
+    void run() override
+    {
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        QImage image = ThumbnailCache::renderImageFile(m_filePath, 0);
+        if (m_cancelled->load(std::memory_order_acquire))
+            return;
+        const QString error = image.isNull() ? QStringLiteral("could not render") : QString();
+        QMetaObject::invokeMethod(qApp, [response = m_response, image = std::move(image), error]() mutable {
+            if (!response)
+                return;
+            response->deliver(std::move(image), error);
+        }, Qt::QueuedConnection);
+    }
+
+private:
+    QPointer<OrientedImageResponse> m_response;
+    std::shared_ptr<std::atomic_bool> m_cancelled;
+    QString m_filePath;
+};
+
+} // namespace
+
+QQuickImageResponse *OrientedImageProvider::requestImageResponse(const QString &id, const QSize &)
+{
+    // "p/<path>", same shape as the face preview, so a path may contain '/'.
+    const int slash = id.indexOf(QLatin1Char('/'));
+    const QString path = QUrl::fromPercentEncoding(id.mid(slash + 1).toUtf8());
+    auto *response = new OrientedImageResponse(path);
+    auto *job = new OrientedImageJob(response);
+    ThumbnailProvider::threadPool()->start(job);
+    return response;
+}
+
 QString Thumbnails::originalSource(const QString &filePath) const
 {
-    return QUrl::fromLocalFile(filePath).toString();
+    return QStringLiteral("image://oriented/p/")
+        + QString::fromLatin1(QUrl::toPercentEncoding(filePath, "/"));
 }
 
 namespace {

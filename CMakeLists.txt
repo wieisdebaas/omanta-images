@@ -30,6 +30,8 @@ set(OMANTA_SOURCES
     src/DirectoryModel.h
     src/DirectoryTreeModel.cpp
     src/DirectoryTreeModel.h
+    src/ImageOrientation.cpp
+    src/ImageOrientation.h
     src/FileEntry.cpp
     src/FileEntry.h
     src/FileOperations.cpp

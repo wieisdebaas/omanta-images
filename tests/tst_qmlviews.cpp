@@ -12,6 +12,10 @@
 #include "ThumbnailProvider.h"
 #include "TestFixture.h"
 
+#include <QBuffer>
+#include <QDataStream>
+#include <QImage>
+#include <QPainter>
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QGuiApplication>
@@ -97,6 +101,7 @@ private Q_SLOTS:
     void spacePreviewsInSushi();
     void tabCloseButtonClosesTab();
     void tabTitlesFollowNavigation();
+    void photoPopupHonoursExifOrientation();
 
 private:
     QTemporaryDir m_cache;
@@ -141,6 +146,54 @@ static QQuickItem *findItem(QQuickItem *item, const char *property, const QVaria
 static QQuickItem *findFileRow(QQuickItem *item, const QString &path)
 {
     return findItem(item, "filePath", path);
+}
+
+// The photo popup is the only Image that turns the pixmap cache off.
+static QQuickItem *findUncachedImage(QQuickItem *item)
+{
+    const QVariant cache = item->property("cache");
+    const QUrl source = item->property("source").toUrl();
+    if (cache.isValid() && cache.toBool() == false && source.isValid() && !source.isEmpty())
+        return item;
+    for (QQuickItem *child : item->childItems()) {
+        if (auto *found = findUncachedImage(child))
+            return found;
+    }
+    return nullptr;
+}
+
+static bool writeSidewaysJpeg(const QString &path)
+{
+    // Sensor pixels are landscape. Orientation 6 means "rotate 90° clockwise",
+    // which is how a phone stores a portrait shot. The viewer must show it tall.
+    QImage image(400, 200, QImage::Format_RGB32);
+    image.fill(Qt::blue);
+    QPainter painter(&image);
+    painter.fillRect(0, 0, 200, 200, Qt::red);
+    painter.end();
+
+    QByteArray tiff;
+    {
+        QDataStream stream(&tiff, QIODevice::WriteOnly);
+        stream.setByteOrder(QDataStream::BigEndian);
+        stream.writeRawData("MM", 2);
+        stream << quint16(42) << quint32(8) << quint16(1);
+        stream << quint16(0x0112) << quint16(3) << quint32(1);
+        stream << quint16(6) << quint16(0) << quint32(0);
+    }
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "JPEG", 95))
+        return false;
+    const QByteArray payload = QByteArray("Exif\0\0", 6) + tiff;
+    QByteArray app1;
+    QDataStream stream(&app1, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint8(0xFF) << quint8(0xE1) << quint16(payload.size() + 2);
+    stream.writeRawData(payload.constData(), payload.size());
+    jpeg.insert(2, app1);
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(jpeg) == qint64(jpeg.size());
 }
 
 static void checkListIconSizing(QQuickWindow *window, QQuickItem *tab,
@@ -1396,6 +1449,56 @@ void TestQmlViews::tabTitlesFollowNavigation()
     go("two");
     openTab("one");
     QTRY_COMPARE(tabStripLabels(window->contentItem()), (QStringList{"two", "one"}));
+}
+
+void TestQmlViews::photoPopupHonoursExifOrientation()
+{
+    QTest::failOnWarning(QRegularExpression("Required property|Cannot assign.*undefined|TypeError"));
+    TempTree tree;
+    QTemporaryDir config;
+    QVERIFY(config.isValid());
+    for (const char *env : {"OMANTA_SETTINGS_FILE", "OMANTA_STARRED_FILE",
+                           "OMANTA_SERVERS_FILE", "OMANTA_BOOKMARKS_FILE"})
+        qputenv(env, config.filePath(env).toUtf8());
+    const QString path = tree.filePath(QStringLiteral("portrait.jpg"));
+    QVERIFY(writeSidewaysJpeg(path));
+
+    QQmlApplicationEngine engine;
+    engine.addImageProvider("fileicon", new IconImageProvider);
+    engine.addImageProvider("thumbnail", new ThumbnailProvider);
+    engine.addImageProvider("photo", new PhotoThumbnailProvider);
+    engine.addImageProvider("oriented", new OrientedImageProvider);
+    Application application(&engine);
+    Platform platform;
+    SystemTheme theme;
+    qmlRegisterSingletonInstance("Omanta.Runtime", 1, 0, "App", &application);
+    qmlRegisterSingletonInstance("Omanta.Runtime", 1, 0, "Platform", &platform);
+    qmlRegisterSingletonInstance("Omanta.Runtime", 1, 0, "Theme", &theme);
+    application.openWindow(tree.path());
+    QQuickWindow *window = nullptr;
+    for (QObject *child : application.children()) {
+        if (child->property("currentTab").isValid()) {
+            window = qobject_cast<QQuickWindow *>(child);
+            break;
+        }
+    }
+    QVERIFY(window);
+    auto *tab = qobject_cast<QQuickItem *>(window->property("currentTab").value<QObject *>());
+    QVERIFY(tab);
+    tab->setProperty("viewMode", QStringLiteral("photo"));
+
+    QTRY_VERIFY(findItem(tab, "previewPath", path));
+    QQuickItem *cell = findItem(tab, "previewPath", path);
+    const QPoint click = cell->mapToScene(QPointF(cell->width() / 2, cell->height() / 2)).toPoint();
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, click);
+
+    QQuickItem *photo = nullptr;
+    QTRY_VERIFY(photo = findUncachedImage(window->contentItem()));
+    QTRY_COMPARE(photo->property("status").toInt(), 1); // Image.Ready
+    const QSize oriented = photo->property("sourceSize").toSize();
+    QVERIFY2(oriented.height() > oriented.width(),
+             qPrintable(QStringLiteral("%1x%2").arg(oriented.width()).arg(oriented.height())));
+    QCOMPARE(oriented, QSize(200, 400));
 }
 
 #include "tst_qmlviews.moc"

@@ -55,6 +55,18 @@ QString withoutPassword(const QString &location)
 {
     if (!isUri(location))
         return location;
+
+    // Android MTP device IDs live in the host and are case-sensitive. QUrl
+    // lowercases hosts (DNS rule), which makes GIO say the mount is missing.
+    if (location.startsWith(QLatin1String("mtp://"), Qt::CaseInsensitive)) {
+        constexpr qsizetype kAuth = 6; // "mtp://"
+        const qsizetype pathStart = location.indexOf(QLatin1Char('/'), kAuth);
+        const qsizetype at = location.indexOf(QLatin1Char('@'), kAuth);
+        if (at >= kAuth && (pathStart < 0 || at < pathStart))
+            return location.left(kAuth) + location.mid(at + 1);
+        return location;
+    }
+
     return QUrl(location).toString(QUrl::RemovePassword | QUrl::FullyEncoded);
 }
 
@@ -146,6 +158,24 @@ QString parent(const QString &location)
     // Syntactic, not through g_file_get_parent: for an unmounted URI GIO's
     // answer depends on which gvfs client modules happen to be loaded, and a
     // parent that exists on the desktop but not in a test is a trap.
+    //
+    // mtp:// keeps the authority bytes from `location` — QUrl would lowercase
+    // the Android serial and break the mount (see withoutPassword).
+    if (location.startsWith(QLatin1String("mtp://"), Qt::CaseInsensitive)) {
+        constexpr qsizetype kAuth = 6; // "mtp://"
+        const qsizetype pathStart = location.indexOf(QLatin1Char('/'), kAuth);
+        if (pathStart < 0)
+            return {};
+        QString path = location.mid(pathStart);
+        while (path.length() > 1 && path.endsWith(QLatin1Char('/')))
+            path.chop(1);
+        if (path.isEmpty() || path == QLatin1String("/"))
+            return {};
+        const qsizetype cut = path.lastIndexOf(QLatin1Char('/'));
+        const QString newPath = cut <= 0 ? QStringLiteral("/") : path.left(cut);
+        return clean(location.left(pathStart) + newPath);
+    }
+
     QUrl url(location);
     QString path = url.path();
     while (path.length() > 1 && path.endsWith(QLatin1Char('/')))
@@ -172,6 +202,21 @@ QString displayName(const QString &location)
         const QString label = rootLabel(url.scheme());
         if (!label.isEmpty())
             return label;
+        // Preserve MTP host case for the crumb/tab label (QUrl lowercases it).
+        if (location.startsWith(QLatin1String("mtp://"), Qt::CaseInsensitive)) {
+            constexpr qsizetype kAuth = 6; // "mtp://"
+            const qsizetype pathStart = location.indexOf(QLatin1Char('/'), kAuth);
+            QString host = pathStart < 0 ? location.mid(kAuth)
+                                         : location.mid(kAuth, pathStart - kAuth);
+            const qsizetype at = host.lastIndexOf(QLatin1Char('@'));
+            if (at >= 0)
+                host = host.mid(at + 1);
+            const qsizetype colon = host.indexOf(QLatin1Char(':'));
+            if (colon >= 0)
+                host = host.left(colon);
+            if (!host.isEmpty())
+                return host;
+        }
         if (!url.host().isEmpty())
             return url.host();
         return url.scheme();

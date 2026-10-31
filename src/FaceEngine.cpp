@@ -1,8 +1,11 @@
 #include "FaceEngine.h"
 
+#include "ImageOrientation.h"
+
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QImage>
+#include <QImageIOHandler>
 #include <QImageReader>
 
 #include <opencv2/imgproc.hpp>
@@ -113,11 +116,19 @@ FaceEngine::Result FaceEngine::detect(const QString &path, QString *error)
         }
     }
 
-    const QImage image = reader.read();
+    QImage image = reader.read();
     if (image.isNull()) {
         if (error)
             *error = reader.errorString();
         return result;
+    }
+    // Same rule as the preview: only tags the decoder left untouched. A 90°
+    // tag swaps the axes size() reported, which is the space the boxes use.
+    if (reader.transformation() == QImageIOHandler::TransformationNone) {
+        const int orientation = ImageOrientation::orientationOf(ImageOrientation::headerFromFile(path));
+        image = ImageOrientation::apply(image, orientation);
+        if (orientation >= 5 && orientation <= 8 && full.isValid())
+            full.transpose();
     }
     result.decoded = true;
     if (!full.isValid() || full.width() <= 0 || full.height() <= 0)

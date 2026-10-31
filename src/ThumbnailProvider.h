@@ -87,6 +87,14 @@ public:
     static QThreadPool *threadPool();
 };
 
+// Full-resolution decode for the photo popup. Qt Quick's Image leaves EXIF
+// orientation unapplied, so a file:// URL shows phone photos on their side.
+class OrientedImageProvider : public QQuickAsyncImageProvider
+{
+public:
+    QQuickImageResponse *requestImageResponse(const QString &id, const QSize &requestedSize) override;
+};
+
 class PhotoThumbnailCache
 {
 public:
@@ -193,6 +201,8 @@ public:
                                     qint64 fileSize, int requestedSize,
                                     int priority = 0) const;
     Q_INVOKABLE void notePhotoPriority(const QString &filePath, int priority) const;
+    // Full-size pixels with EXIF orientation applied. A file:// URL would skip
+    // that tag: Qt Quick's Image does not read it.
     Q_INVOKABLE QString originalSource(const QString &filePath) const;
     // Network URIs, gvfs, spinning disks, and not-yet-mounted /media paths.
     // A mounted SSD (including under /run/media) stays fast.

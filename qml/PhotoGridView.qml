@@ -288,8 +288,11 @@ Item {
                 anchors.bottomMargin: 48
                 // A NAS photo is an smb:// URI. Qt cannot open that as a file
                 // URL, so the popup asks the photo provider, which reads it
-                // through GIO. Local files still show the original, and with
-                // faces on that original is oriented the same way the boxes are.
+                // through GIO. A local file is the original pixels, decoded
+                // with its EXIF orientation: Qt Quick's Image would otherwise
+                // show a phone photo on its side or upside down. With faces
+                // on, that decode is the face preview, oriented the same way
+                // the boxes were measured.
                 source: !preview.opened || root.activePath === "" ? ""
                       : (Settings.showFaces || root.tab.path === "people:///")
                         && Platform.isLocal(root.activePath)

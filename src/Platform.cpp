@@ -340,6 +340,32 @@ QVariantList Platform::pathCrumbs(const QString &path) const
     // A URI breadcrumb starts at the root of its scheme — "Trash", or the
     // host of a mount — and walks the decoded segments below it.
     if (Location::isUri(path)) {
+        // mtp:// Android serials are case-sensitive; rebuilding via QUrl would
+        // lowercase the host and make every crumb point at a missing mount.
+        if (path.startsWith(QLatin1String("mtp://"), Qt::CaseInsensitive)) {
+            constexpr qsizetype kAuth = 6; // "mtp://"
+            const qsizetype pathStart = path.indexOf(QLatin1Char('/'), kAuth);
+            const QString prefix = pathStart < 0 ? path : path.left(pathStart);
+            const QString root = Location::clean(prefix + QLatin1Char('/'));
+            crumbs.append(QVariantMap{
+                { QStringLiteral("label"), Location::displayName(root) },
+                { QStringLiteral("path"), root } });
+
+            if (pathStart >= 0) {
+                const QStringList parts =
+                    path.mid(pathStart).split(QLatin1Char('/'), Qt::SkipEmptyParts);
+                QString soFar;
+                for (const QString &part : parts) {
+                    soFar += QLatin1Char('/') + part;
+                    crumbs.append(QVariantMap{
+                        { QStringLiteral("label"),
+                          QUrl::fromPercentEncoding(part.toUtf8()) },
+                        { QStringLiteral("path"), Location::clean(prefix + soFar) } });
+                }
+            }
+            return crumbs;
+        }
+
         QUrl url(path);
         QUrl walked(url);
         walked.setPath(QStringLiteral("/"));

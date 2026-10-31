@@ -1,5 +1,8 @@
 #include "FacePreviewProvider.h"
 
+#include "ImageOrientation.h"
+
+#include <QImageIOHandler>
 #include <QImageReader>
 #include <QUrl>
 
@@ -14,7 +17,14 @@ QImage FacePreviewProvider::requestImage(const QString &id, QSize *size, const Q
     const QString path = QUrl::fromPercentEncoding(id.mid(slash + 1).toUtf8());
     QImageReader reader(path);
     reader.setAutoTransform(true);
-    const QImage image = reader.read();
+    reader.setAllocationLimit(1024);
+    QImage image = reader.read();
+    // JPEG/TIFF already rotated. WebP and PNG leave the tag for us; applying
+    // it when the plugin already did would turn the picture upside down again.
+    if (!image.isNull() && reader.transformation() == QImageIOHandler::TransformationNone) {
+        image = ImageOrientation::apply(image,
+            ImageOrientation::orientationOf(ImageOrientation::headerFromFile(path)));
+    }
     if (size)
         *size = image.size();
     return image;

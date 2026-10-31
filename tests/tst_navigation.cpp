@@ -1,3 +1,4 @@
+#include "Location.h"
 #include "NavigationHistory.h"
 #include "Platform.h"
 #include "TestFixture.h"
@@ -37,6 +38,7 @@ private Q_SLOTS:
     void uriParentStopsAtItsRoot();
     void uriDisplayNames();
     void uriCrumbs();
+    void mtpHostCasePreserved();
     void typedUrisPassThroughResolve();
     void fileUrisNormalizeToPaths();
 
@@ -291,6 +293,38 @@ void TestNavigation::uriCrumbs()
     QCOMPARE(trash.size(), 1);
     QCOMPARE(trash.at(0).toMap().value(QStringLiteral("label")).toString(),
              QStringLiteral("Trash"));
+}
+
+void TestNavigation::mtpHostCasePreserved()
+{
+    // Android MTP device IDs are case-sensitive. QUrl lowercases hosts, and
+    // GIO then reports the mount as missing — so every Location helper that
+    // touches an mtp:// URI must keep the serial exactly as written.
+    Platform platform;
+    const QString root = QStringLiteral("mtp://SAMSUNG_SAMSUNG_Android_R5CY323V2WH/");
+    const QString nested =
+        QStringLiteral("mtp://SAMSUNG_SAMSUNG_Android_R5CY323V2WH/Interne%20opslag/DCIM");
+
+    QCOMPARE(Location::withoutPassword(root), root);
+    QCOMPARE(Location::withoutPassword(nested), nested);
+    QCOMPARE(Location::clean(root), root);
+    QVERIFY(Location::clean(nested).startsWith(
+        QStringLiteral("mtp://SAMSUNG_SAMSUNG_Android_R5CY323V2WH/")));
+
+    QCOMPARE(Location::parent(nested),
+             Location::clean(QStringLiteral(
+                 "mtp://SAMSUNG_SAMSUNG_Android_R5CY323V2WH/Interne%20opslag")));
+    QCOMPARE(Location::parent(root), QString());
+    QCOMPARE(Location::displayName(root),
+             QStringLiteral("SAMSUNG_SAMSUNG_Android_R5CY323V2WH"));
+
+    const QVariantList crumbs = platform.pathCrumbs(nested);
+    QCOMPARE(crumbs.size(), 3);
+    for (const QVariant &crumb : crumbs) {
+        QVERIFY(crumb.toMap().value(QStringLiteral("path")).toString().startsWith(
+            QStringLiteral("mtp://SAMSUNG_SAMSUNG_Android_R5CY323V2WH")));
+    }
+    QCOMPARE(crumbs.at(0).toMap().value(QStringLiteral("path")).toString(), root);
 }
 
 void TestNavigation::typedUrisPassThroughResolve()

@@ -2,7 +2,9 @@
 #include "TestFixture.h"
 #include "ThumbnailProvider.h"
 
+#include <QBuffer>
 #include <QCryptographicHash>
+#include <QDataStream>
 #include <QDir>
 #include <QFile>
 #include <QImage>
@@ -166,16 +168,142 @@ void TestThumbnails::rendersAHighResolutionImage()
     QVERIFY(thumb.width() <= 256 && thumb.height() <= 256);
 }
 
+namespace {
+
+// Little-endian TIFF is what cameras write; this one is big-endian, which is
+// the other legal EXIF byte order, so the reader cannot assume "II".
+QByteArray tiffWithOrientation(int orientation)
+{
+    QByteArray tiff;
+    QDataStream stream(&tiff, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream.writeRawData("MM", 2);
+    stream << quint16(42) << quint32(8);
+    stream << quint16(1);
+    stream << quint16(0x0112) << quint16(3) << quint32(1);
+    stream << quint16(orientation) << quint16(0);
+    stream << quint32(0);
+    return tiff;
+}
+
+QImage fourQuadrants()
+{
+    // Distinct corners, so a mirror cannot be mistaken for "no change" and a
+    // 90° turn cannot be mistaken for 270°.
+    QImage image(400, 200, QImage::Format_RGB32);
+    QPainter painter(&image);
+    painter.fillRect(0, 0, 200, 100, Qt::red);
+    painter.fillRect(200, 0, 200, 100, Qt::green);
+    painter.fillRect(0, 100, 200, 100, Qt::yellow);
+    painter.fillRect(200, 100, 200, 100, Qt::blue);
+    painter.end();
+    return image;
+}
+
+bool writeOrientedJpeg(const QString &path, const QImage &image, int orientation)
+{
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "JPEG", 95))
+        return false;
+    buffer.close();
+
+    const QByteArray payload = QByteArray("Exif\0\0", 6) + tiffWithOrientation(orientation);
+    QByteArray app1;
+    QDataStream stream(&app1, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint8(0xFF) << quint8(0xE1) << quint16(payload.size() + 2);
+    stream.writeRawData(payload.constData(), payload.size());
+    jpeg.insert(2, app1);
+
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(jpeg) == qint64(jpeg.size());
+}
+
+bool writeOrientedWebp(const QString &path, const QImage &image, int orientation)
+{
+    QByteArray webp;
+    QBuffer buffer(&webp);
+    if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "WEBP", 100))
+        return false;
+    buffer.close();
+    if (!webp.startsWith("RIFF"))
+        return false;
+
+    const QByteArray tiff = tiffWithOrientation(orientation);
+    QByteArray chunk;
+    QDataStream stream(&chunk, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream.writeRawData("EXIF", 4);
+    stream << quint32(tiff.size());
+    stream.writeRawData(tiff.constData(), tiff.size());
+    if (tiff.size() & 1)
+        stream << quint8(0);
+    webp.append(chunk);
+    const quint32 riffSize = quint32(webp.size() - 8);
+    webp[4] = char(riffSize);
+    webp[5] = char(riffSize >> 8);
+    webp[6] = char(riffSize >> 16);
+    webp[7] = char(riffSize >> 24);
+
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(webp) == qint64(webp.size());
+}
+
+QString cornerWord(const QImage &image, qreal x, qreal y)
+{
+    const QColor color = image.pixelColor(qBound(0, int(image.width() * x), image.width() - 1),
+                                          qBound(0, int(image.height() * y), image.height() - 1));
+    if (color.red() > 180 && color.green() < 80 && color.blue() < 80)
+        return QStringLiteral("red");
+    if (color.green() > 180 && color.red() < 80 && color.blue() < 80)
+        return QStringLiteral("green");
+    if (color.red() > 180 && color.green() > 180 && color.blue() < 80)
+        return QStringLiteral("yellow");
+    if (color.blue() > 180 && color.red() < 80 && color.green() < 80)
+        return QStringLiteral("blue");
+    return color.name();
+}
+
+} // namespace
+
 void TestThumbnails::honoursExifOrientation()
 {
-    // No EXIF here, but the reader must at least not mangle a plain image —
-    // the setting that enables rotation is easy to lose in a refactor.
+    // Phone and camera files store the sensor's pixels and a separate
+    // orientation tag. JPEG's decoder applies that tag; Qt's WebP decoder
+    // does not. Both have to match, including mirrors (tags 2, 4, 5 and 7).
     TempTree tree;
-    const QString path = writeImage(tree, QStringLiteral("wide.png"), 600, 200);
+    const QImage pixels = fourQuadrants();
+    for (int orientation = 1; orientation <= 8; ++orientation) {
+        const QString jpegName = QStringLiteral("o%1.jpg").arg(orientation);
+        const QString webpName = QStringLiteral("o%1.webp").arg(orientation);
+        QVERIFY(writeOrientedJpeg(tree.filePath(jpegName), pixels, orientation));
+        QVERIFY(writeOrientedWebp(tree.filePath(webpName), pixels, orientation));
 
-    const QImage thumb = ThumbnailCache::renderImageFile(path, 128);
-    QVERIFY(!thumb.isNull());
-    QVERIFY2(thumb.width() > thumb.height(), "a landscape image must stay landscape");
+        const QImage jpeg = ThumbnailCache::renderImageFile(tree.filePath(jpegName), 128);
+        const QImage webp = ThumbnailCache::renderImageFile(tree.filePath(webpName), 128);
+        QVERIFY2(!jpeg.isNull() && !webp.isNull(), qPrintable(QString::number(orientation)));
+        if (webp.size() != jpeg.size()) {
+            QFAIL(qPrintable(QStringLiteral("orientation %1 size webp %2x%3 jpeg %4x%5")
+                                 .arg(orientation)
+                                 .arg(webp.width()).arg(webp.height())
+                                 .arg(jpeg.width()).arg(jpeg.height())));
+        }
+        for (const qreal x : {0.25, 0.75}) {
+            for (const qreal y : {0.25, 0.75}) {
+                if (cornerWord(webp, x, y) != cornerWord(jpeg, x, y)) {
+                    QFAIL(qPrintable(QStringLiteral("orientation %1 at %2,%3 webp %4 jpeg %5")
+                                         .arg(orientation).arg(x).arg(y)
+                                         .arg(cornerWord(webp, x, y), cornerWord(jpeg, x, y))));
+                }
+            }
+        }
+    }
+
+    // The viewer asks for the file itself, not a thumbnail. Orientation 6
+    // stores a 400×200 sensor image that must come back 200×400.
+    const QImage full = ThumbnailCache::renderImageFile(tree.filePath(QStringLiteral("o6.jpg")), 0);
+    QCOMPARE(full.size(), QSize(200, 400));
 }
 
 void TestThumbnails::decodesAFileUriTheWayANasShareIsOpened()
