@@ -47,6 +47,27 @@ std::atomic<bool> *g_reachedBeforePhotoStore = nullptr;
 
 namespace {
 
+// Latched by aboutToQuit before image plugins and the cache mutex are torn
+// down. Workers that see either flag must not enter QImageReader or touch
+// the photo cache / provider again.
+std::atomic_bool g_photoShutdown{false};
+std::atomic_bool g_fileThumbnailShutdown{false};
+
+bool photoThumbnailsClosed()
+{
+    return g_photoShutdown.load(std::memory_order_acquire);
+}
+
+bool fileThumbnailsClosed()
+{
+    return g_fileThumbnailShutdown.load(std::memory_order_acquire);
+}
+
+bool imageReadsClosed()
+{
+    return photoThumbnailsClosed() || fileThumbnailsClosed();
+}
+
 QMutex g_registryMutex;
 bool g_registryLoaded = false;
 QHash<QString, QStringList> g_thumbnailers; // mime type → argv template
@@ -473,6 +494,9 @@ QString ThumbnailCache::contentTypeOf(const QString &filePath)
 
 QImage ThumbnailCache::render(const QString &filePath, const QString &mimeType, int size)
 {
+    if (imageReadsClosed())
+        return {};
+
     QImage image;
     if (mimeType.startsWith(QLatin1String("image/")))
         image = renderImageFile(filePath, size);
@@ -483,6 +507,11 @@ QImage ThumbnailCache::render(const QString &filePath, const QString &mimeType, 
 
 QImage ThumbnailCache::renderImageFile(const QString &filePath, int size)
 {
+    // Quit joins the pools first, but a worker that has not entered the
+    // decoder yet must not construct a QImageReader after plugins start to go.
+    if (imageReadsClosed())
+        return {};
+
     // Native paths go straight to the decoder. GIO URIs (a NAS opened as
     // smb://) are not files QImageReader can open, so the bytes come across
     // first and the same scaled decode runs on the buffer.
@@ -637,6 +666,8 @@ private:
 void deliverThumbnail(const QPointer<ThumbnailResponse> &response, QImage image,
                       const QString &error)
 {
+    if (fileThumbnailsClosed() || !qApp)
+        return;
     // Post via qApp so a deleteLater'd response never receives the event.
     QMetaObject::invokeMethod(qApp, [response, image = std::move(image), error]() mutable {
         if (!response)
@@ -659,7 +690,7 @@ public:
 
     void run() override
     {
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
             return;
 
         const QFileInfo info(m_filePath);
@@ -681,7 +712,7 @@ public:
             return;
         }
 
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
             return;
 
         if (QImage cached = ThumbnailCache::loadValid(m_filePath, m_bucket); !cached.isNull()) {
@@ -702,11 +733,11 @@ public:
         ThumbnailCache::Version version;
         const QString mimeType = ThumbnailCache::contentTypeOf(m_filePath);
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (m_cancelled->load(std::memory_order_acquire))
+            if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
                 return;
             version = ThumbnailCache::Version::of(m_filePath);
             generated = ThumbnailCache::render(m_filePath, mimeType, m_bucket);
-            if (m_cancelled->load(std::memory_order_acquire))
+            if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
                 return;
             if (ThumbnailCache::Version::of(m_filePath) == version) {
                 if (generated.isNull())
@@ -717,7 +748,7 @@ public:
             }
         }
 
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
             return;
 
         if (m_expected.modifiedMSecs > 0 && !(version == m_expected)) {
@@ -758,6 +789,14 @@ QThreadPool *ThumbnailProvider::threadPool()
     return &pool;
 }
 
+void ThumbnailProvider::shutdown()
+{
+    g_fileThumbnailShutdown.store(true, std::memory_order_release);
+    QThreadPool *pool = threadPool();
+    pool->clear();
+    pool->waitForDone();
+}
+
 QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
                                                              const QSize &requestedSize)
 {
@@ -765,7 +804,8 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id,
     ThumbnailCache::Version expected;
     const QString path = Thumbnails::pathFromId(id, &expected);
     auto *response = new ThumbnailResponse(path, expected, size);
-    threadPool()->start(new ThumbnailJob(response));
+    if (!fileThumbnailsClosed())
+        threadPool()->start(new ThumbnailJob(response));
     return response;
 }
 
@@ -948,6 +988,8 @@ private:
 void deliverPhotoThumbnail(const QPointer<PhotoThumbnailResponse> &response, QImage image,
                            const QString &error)
 {
+    if (photoThumbnailsClosed() || !qApp)
+        return;
     QMetaObject::invokeMethod(qApp, [response, image = std::move(image), error]() mutable {
         if (!response)
             return;
@@ -970,14 +1012,21 @@ public:
 
     void run() override
     {
+        if (photoThumbnailsClosed())
+            return;
+
         m_provider->noteDecodeStarted(m_filePath, this);
         struct Finish {
             PhotoThumbnailProvider *provider;
             QString path;
-            ~Finish() { provider->noteDecodeFinished(path); }
+            ~Finish()
+            {
+                if (!photoThumbnailsClosed())
+                    provider->noteDecodeFinished(path);
+            }
         } finish{m_provider, m_filePath};
 
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || photoThumbnailsClosed())
             return;
 
         QImage cached = PhotoThumbnailCache::load(m_filePath, m_bucket, m_version);
@@ -986,11 +1035,11 @@ public:
             return;
         }
 
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || photoThumbnailsClosed())
             return;
 
         QImage image = ThumbnailCache::renderImageFile(m_filePath, m_bucket);
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || photoThumbnailsClosed())
             return;
         if (image.isNull()) {
             deliverPhotoThumbnail(m_response, {}, QStringLiteral("could not render"));
@@ -1004,9 +1053,14 @@ public:
         if (auto *reached = OmantaThumbnailTest::g_reachedBeforePhotoStore)
             reached->store(true, std::memory_order_release);
         if (auto *pause = OmantaThumbnailTest::g_pauseBeforePhotoStore) {
-            while (!pause->load(std::memory_order_acquire))
+            while (!pause->load(std::memory_order_acquire) && !photoThumbnailsClosed())
                 QThread::msleep(1);
         }
+        // Response cancel still persists the decode (the cell scrolled away,
+        // the bytes are already paid for). Process shutdown must not: the
+        // cache mutex and QImageWriter are about to be destroyed.
+        if (photoThumbnailsClosed())
+            return;
 
         // RAM + a queued GUI delivery first, so scrolling sees pixels before
         // WebP hits the disk. The disk write still happens if the cell scrolled
@@ -1030,6 +1084,7 @@ private:
 
 PhotoThumbnailProvider::PhotoThumbnailProvider()
 {
+    g_photoShutdown.store(false, std::memory_order_release);
     g_photoProvider = this;
     PhotoThumbnailCache::setMemoryLimit(PhotoThumbnailCache::DefaultMemoryLimit);
     m_pool.setExpiryTimeout(30000);
@@ -1042,14 +1097,39 @@ PhotoThumbnailProvider::PhotoThumbnailProvider()
 
 PhotoThumbnailProvider::~PhotoThumbnailProvider()
 {
+    shutdown();
     if (g_photoProvider == this)
         g_photoProvider = nullptr;
-    {
-        QMutexLocker lock(&m_queueMutex);
-        m_queued.clear();
+    // ThumbnailProvider::shutdown() runs from aboutToQuit and stays latched,
+    // so photo decodes stay closed through engine teardown. Tests never latch
+    // it; reopening here keeps later ThumbnailCache reads working.
+    if (fileThumbnailsClosed())
+        return;
+    g_photoShutdown.store(false, std::memory_order_release);
+}
+
+void PhotoThumbnailProvider::shutdown()
+{
+    g_photoShutdown.store(true, std::memory_order_release);
+    PhotoThumbnailProvider *provider = g_photoProvider;
+    if (!provider) {
+        PhotoThumbnailCache::clearMemory();
+        return;
     }
-    m_pool.clear();
-    m_pool.waitForDone();
+
+    {
+        QMutexLocker lock(&provider->m_queueMutex);
+        provider->m_queued.clear();
+    }
+    // Drop jobs that have not started, then wait out the ones already inside
+    // QImageReader. The cache mutex is only taken after that.
+    provider->m_pool.clear();
+    provider->m_pool.waitForDone();
+    {
+        QMutexLocker lock(&provider->m_queueMutex);
+        provider->m_decoding.clear();
+        provider->m_queued.clear();
+    }
     PhotoThumbnailCache::clearMemory();
 }
 
@@ -1099,6 +1179,8 @@ void PhotoThumbnailProvider::noteDecodeFinished(const QString &filePath)
 
 void PhotoThumbnailProvider::reprioritize(const QString &filePath, int priority)
 {
+    if (photoThumbnailsClosed())
+        return;
     QMutexLocker lock(&m_queueMutex);
     auto queued = m_queued.find(filePath);
     if (queued == m_queued.end())
@@ -1145,13 +1227,22 @@ QQuickImageResponse *PhotoThumbnailProvider::requestImageResponse(const QString 
     const QString path = QUrl::fromPercentEncoding(parts.mid(2).join(QLatin1Char('/')).toUtf8());
     const int size = requestedSize.width() > 0 ? requestedSize.width() : encodedSize;
     const int priority = Thumbnails::photoPriorityFor(path);
+    if (photoThumbnailsClosed())
+        return new PhotoThumbnailResponse({}, {}, 256);
+
     auto *response = new PhotoThumbnailResponse(path, expected, size);
     auto *job = new PhotoThumbnailJob(response, this);
     {
         QMutexLocker lock(&m_queueMutex);
+        if (photoThumbnailsClosed()) {
+            delete job;
+            return response;
+        }
         m_queued[path].append({job, priority});
+        // start() under the queue lock so shutdown cannot clear-and-join
+        // in the gap between enqueue and the pool accepting the runnable.
+        m_pool.start(job, priority);
     }
-    m_pool.start(job, priority);
     return response;
 }
 
@@ -1304,10 +1395,10 @@ public:
 
     void run() override
     {
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed())
             return;
         QImage image = ThumbnailCache::renderImageFile(m_filePath, 0);
-        if (m_cancelled->load(std::memory_order_acquire))
+        if (m_cancelled->load(std::memory_order_acquire) || fileThumbnailsClosed() || !qApp)
             return;
         const QString error = image.isNull() ? QStringLiteral("could not render") : QString();
         QMetaObject::invokeMethod(qApp, [response = m_response, image = std::move(image), error]() mutable {
@@ -1331,8 +1422,8 @@ QQuickImageResponse *OrientedImageProvider::requestImageResponse(const QString &
     const int slash = id.indexOf(QLatin1Char('/'));
     const QString path = QUrl::fromPercentEncoding(id.mid(slash + 1).toUtf8());
     auto *response = new OrientedImageResponse(path);
-    auto *job = new OrientedImageJob(response);
-    ThumbnailProvider::threadPool()->start(job);
+    if (!fileThumbnailsClosed())
+        ThumbnailProvider::threadPool()->start(new OrientedImageJob(response));
     return response;
 }
 

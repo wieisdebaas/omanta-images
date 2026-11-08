@@ -68,6 +68,7 @@ private Q_SLOTS:
     void queuedPhotoPriorityFollowsTheViewport();
     void cancelledDecodeStillWritesTheDiskCache();
     void photoIoBoundTracksLiveViews();
+    void photoShutdownJoinsWorkersBeforeClearingMemory();
 
 private:
     static QString writeImage(const TempTree &tree, const QString &name, int w, int h)
@@ -750,6 +751,93 @@ void TestThumbnails::photoIoBoundTracksLiveViews()
     fast.reset();
     QVERIFY(!provider.ioBound());
     QCOMPARE(provider.threadPool()->maxThreadCount(), fastThreads);
+}
+
+void TestThumbnails::photoShutdownJoinsWorkersBeforeClearingMemory()
+{
+    // Closing the last window quits while the photo grid is still decoding.
+    // aboutToQuit must cancel that work and join the pool before the cache
+    // mutex or Qt's image plugins are destroyed — the quit SIGSEGV.
+    TempTree tree;
+    Thumbnails thumbnails;
+    const auto request = [&thumbnails](PhotoThumbnailProvider &provider, const QString &path) {
+        const QFileInfo info(path);
+        const QString source =
+            thumbnails.photoSource(path, info.lastModified(), info.size(), 256, 40);
+        const QString id =
+            QUrl(source).toString(QUrl::RemoveScheme | QUrl::RemoveAuthority).mid(1);
+        return provider.requestImageResponse(id, QSize(256, 256));
+    };
+
+    {
+        PhotoThumbnailProvider provider;
+        const QString path = writeImage(tree, QStringLiteral("shutdown-flood.png"), 2000, 2000);
+        QList<QQuickImageResponse *> responses;
+        for (int i = 0; i < 8; ++i)
+            responses.append(request(provider, path));
+
+        PhotoThumbnailProvider::shutdown();
+
+        QVERIFY(provider.threadPool()->waitForDone(0));
+        QCOMPARE(provider.threadPool()->activeThreadCount(), 0);
+        QCOMPARE(PhotoThumbnailCache::memoryCount(), 0);
+        QVERIFY(!provider.isActive(path));
+        qDeleteAll(responses);
+    }
+
+    // One decode is parked after the reader returns and before the cache
+    // write. Shutdown has to wake it, skip the cache, and drop the jobs
+    // still sitting in the queue.
+    PhotoThumbnailCache::clearMemory();
+    const QString path = writeImage(tree, QStringLiteral("shutdown-pause.png"), 64, 64);
+    const auto version = ThumbnailCache::Version::of(path);
+    const QString cachePath = PhotoThumbnailCache::cachePathFor(path, 256, version);
+    QFile::remove(cachePath);
+
+    struct Pause {
+        std::atomic<bool> pause{false};
+        std::atomic<bool> reached{false};
+        Pause()
+        {
+            OmantaThumbnailTest::g_pauseBeforePhotoStore = &pause;
+            OmantaThumbnailTest::g_reachedBeforePhotoStore = &reached;
+        }
+        ~Pause()
+        {
+            pause.store(true, std::memory_order_release);
+            OmantaThumbnailTest::g_pauseBeforePhotoStore = nullptr;
+            OmantaThumbnailTest::g_reachedBeforePhotoStore = nullptr;
+        }
+    } pause;
+
+    PhotoThumbnailProvider provider;
+    provider.threadPool()->setMaxThreadCount(1);
+    QList<QQuickImageResponse *> responses;
+    responses.append(request(provider, path));
+    QTRY_VERIFY(pause.reached.load(std::memory_order_acquire));
+
+    QStringList queuedCaches;
+    for (int i = 0; i < 4; ++i) {
+        const QString extra = writeImage(tree, QStringLiteral("shutdown-queued-%1.png").arg(i),
+                                         64, 64);
+        const auto extraVersion = ThumbnailCache::Version::of(extra);
+        const QString extraCache = PhotoThumbnailCache::cachePathFor(extra, 256, extraVersion);
+        QFile::remove(extraCache);
+        queuedCaches.append(extraCache);
+        responses.append(request(provider, extra));
+    }
+
+    PhotoThumbnailProvider::shutdown();
+
+    QVERIFY2(!QFile::exists(cachePath),
+             "a decode already in flight must not write the cache after shutdown");
+    for (const QString &extraCache : queuedCaches)
+        QVERIFY2(!QFile::exists(extraCache), qPrintable(extraCache));
+    QCOMPARE(PhotoThumbnailCache::memoryCount(), 0);
+    QVERIFY(provider.threadPool()->waitForDone(0));
+    QCOMPARE(provider.threadPool()->activeThreadCount(), 0);
+    QVERIFY(!provider.isActive(path));
+    qDeleteAll(responses);
 }
 
 QTEST_MAIN(TestThumbnails)

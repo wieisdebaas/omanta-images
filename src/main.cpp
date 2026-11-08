@@ -81,8 +81,13 @@ int main(int argc, char *argv[])
     app.setOrganizationDomain(QStringLiteral("omarchy.org"));
     app.setDesktopFileName(QStringLiteral("omanta"));
     app.setApplicationVersion(QStringLiteral("0.1.21"));
-    QObject::connect(&app, &QCoreApplication::aboutToQuit,
-                     [] { PhotoThumbnailCache::clearMemory(); });
+    // Join thumbnail decoders before the engine destroys image providers and
+    // Qt unloads image plugins. Clearing the photo cache while a worker is
+    // still in QImageReader is the quit SIGSEGV.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
+        PhotoThumbnailProvider::shutdown();
+        ThumbnailProvider::shutdown();
+    });
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Browse files."));

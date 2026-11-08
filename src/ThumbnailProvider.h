@@ -85,6 +85,9 @@ public:
     // Dedicated pool (not the process-wide global) so icon thumbs cannot
     // saturate every core while photo decode is also running.
     static QThreadPool *threadPool();
+    // Cancel queued file and oriented decodes and wait until none are still
+    // inside QImageReader. aboutToQuit calls this before image plugins unload.
+    static void shutdown();
 };
 
 // Full-resolution decode for the photo popup. Qt Quick's Image leaves EXIF
@@ -129,6 +132,10 @@ class PhotoThumbnailProvider : public QQuickAsyncImageProvider
 public:
     PhotoThumbnailProvider();
     ~PhotoThumbnailProvider() override;
+
+    // Cancel queued photo decodes, wait until the pool is idle, and only then
+    // drop the RAM cache. aboutToQuit must call this before engine teardown.
+    static void shutdown();
 
     QQuickImageResponse *requestImageResponse(const QString &id,
                                               const QSize &requestedSize) override;
